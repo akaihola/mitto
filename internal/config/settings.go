@@ -493,6 +493,27 @@ func LoadSettingsWithFallback() (*LoadResult, error) {
 		mergedCfg.Web.Host = settingsCfg.Web.Host
 	}
 
+	// Merge Conversations settings from settings.json into the merged config.
+	// These settings (e.g. external_images, action_buttons) are typically toggled via
+	// the Settings UI and persisted to settings.json.  When an RC file is present the
+	// merged config starts from rcCfg, so UI-saved Conversations values would be lost
+	// without this merge step.
+	// Strategy: individual leaf fields from settings.json fill in gaps not set in the RC file.
+	if settingsCfg.Conversations != nil {
+		if mergedCfg.Conversations == nil {
+			mergedCfg.Conversations = settingsCfg.Conversations
+		} else {
+			// ExternalImages: only apply settings.json value when RC file doesn't set it.
+			if mergedCfg.Conversations.ExternalImages == nil && settingsCfg.Conversations.ExternalImages != nil {
+				mergedCfg.Conversations.ExternalImages = settingsCfg.Conversations.ExternalImages
+			}
+			// ActionButtons: only apply settings.json value when RC file doesn't set it.
+			if mergedCfg.Conversations.ActionButtons == nil && settingsCfg.Conversations.ActionButtons != nil {
+				mergedCfg.Conversations.ActionButtons = settingsCfg.Conversations.ActionButtons
+			}
+		}
+	}
+
 	// Load keychain password for the merged config
 	// This loads the password from keychain if Auth is configured but password is empty
 	if err := loadKeychainPassword(mergedCfg); err != nil {

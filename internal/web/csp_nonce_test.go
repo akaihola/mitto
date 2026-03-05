@@ -421,7 +421,7 @@ func TestCSPNonceMiddleware_ExternalImagesDisabled(t *testing.T) {
 	// Test with external images disabled (default)
 	wrapped := cspNonceMiddlewareWithOptions(cspNonceMiddlewareOptions{
 		config:              DefaultSecurityConfig(),
-		allowExternalImages: false,
+		allowExternalImages: func() bool { return false },
 	})(handler)
 
 	req := httptest.NewRequest("GET", "/", nil)
@@ -453,7 +453,7 @@ func TestCSPNonceMiddleware_ExternalImagesEnabled(t *testing.T) {
 	// Test with external images enabled
 	wrapped := cspNonceMiddlewareWithOptions(cspNonceMiddlewareOptions{
 		config:              DefaultSecurityConfig(),
-		allowExternalImages: true,
+		allowExternalImages: func() bool { return true },
 	})(handler)
 
 	req := httptest.NewRequest("GET", "/", nil)

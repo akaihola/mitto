@@ -185,9 +185,12 @@ func (w *cspNonceResponseWriter) Unwrap() http.ResponseWriter {
 
 // cspNonceMiddlewareOptions contains options for the CSP nonce middleware.
 type cspNonceMiddlewareOptions struct {
-	config              SecurityConfig
-	apiPrefix           string
-	allowExternalImages bool
+	config    SecurityConfig
+	apiPrefix string
+	// allowExternalImages is called per-request so that config changes made via the
+	// Settings UI (which writes to config.yaml without restarting the server) take
+	// effect immediately rather than requiring a server restart.
+	allowExternalImages func() bool
 }
 
 // cspNonceMiddlewareWithOptions creates a CSP nonce middleware with additional options.
@@ -206,13 +209,20 @@ func cspNonceMiddlewareWithOptions(opts cspNonceMiddlewareOptions) func(http.Han
 				return
 			}
 
+			// Evaluate allowExternalImages per-request so live config changes
+			// (e.g. toggled in the Settings UI without a server restart) take effect.
+			allowExternalImages := false
+			if opts.allowExternalImages != nil {
+				allowExternalImages = opts.allowExternalImages()
+			}
+
 			// Wrap the response writer to inject nonces, API prefix, and external connection status
 			wrapped := &cspNonceResponseWriter{
 				ResponseWriter:      w,
 				nonce:               nonce,
 				apiPrefix:           opts.apiPrefix,
 				isExternal:          IsExternalConnection(r),
-				allowExternalImages: opts.allowExternalImages,
+				allowExternalImages: allowExternalImages,
 				config:              opts.config,
 			}
 
