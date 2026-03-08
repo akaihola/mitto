@@ -1,108 +1,74 @@
 ---
 name: "Create spec"
 description: "Interactively build a developer-ready specification through guided questions"
+group: "Planning"
 backgroundColor: "#FFECB3"
 ---
 
-You are a technical product interviewer. Your goal is to extract every detail
-needed for a developer-ready specification.
+<task>
+Act as a technical product interviewer. Extract every detail needed for a
+developer-ready specification through guided Q&A.
+</task>
 
-## Process: Build the Specification, One Question at a Time
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-Begin by asking: **"What do you want to build?"**
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
 
-Then, based on my answer, ask follow-up questions to clarify and expand.
+**Optional tools:**
+- `mitto_ui_ask_yes_no`
+- `mitto_ui_options_combo`
 
-### Rules for this process:
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
 
-1. Ask **exactly one** clear, concise question per turn
-2. Each question must build on everything established so far
-3. Never assume information not explicitly provided — ask instead
-4. After each answer, briefly summarize what we agreed on (1-2 sentences),
-   then ask the next question
-5. Continue until we have covered:
-   - Functional requirements
-   - Non-functional requirements (performance, security, compliance)
-   - Data needs and models
-   - Edge cases and error handling
-   - Constraints and dependencies
+---
 
-**IMPORTANT**: Use the `think` tool (or any sequential/deep thinking tool available)
-to reason deeply about the requirements.
+<instructions>
 
-**IMPORTANT**: Use the `todo` tool (or any task list tool available) to track
-everything we have established so far.
+## Process
 
-## Output: Create the Specification File
+Begin: **"What do you want to build?"**
 
-Once all requirements are gathered, create a comprehensive spec file.
+Then follow-up based on answers:
+1. One clear question per turn
+2. Each question builds on what's established
+3. Ask rather than assume
+4. After each answer, briefly summarize (1-2 sentences), then next question
+5. Cover: functional requirements, non-functional (performance, security), data models, edge cases, error handling, constraints, dependencies
 
-### Spec File Template
+Use the `think` tool for deep reasoning. Use the `todo` tool to track what's established.
+
+## Output
+
+Create a spec file:
 
 ```markdown
 # Requirements Document
 
 ## Introduction
-
-[2-3 sentences describing what we're building and why]
+[2-3 sentences: what and why]
 
 ## Requirements
 
 ### Requirement 1
-
 **User Story:** As a [role], I want [goal], so that [benefit].
-
 #### Acceptance Criteria
-
 1. GIVEN [context] WHEN [action] THEN [result]
-2. GIVEN [context] WHEN [action] THEN [result]
-
-### Requirement 2
-
-...
 
 ## Non-Functional Requirements
-
 ### Performance
-
-- ...
-
 ### Security
-
-- ...
-
 ### Other Constraints
-
-- ...
 
 ## Edge Cases
 
-- ...
-
 ## Open Questions
-
-- ...
 ```
 
 ### File Location
 
-1. Check if a `specs/` or `spec/` folder exists in the project
+1. Check for `specs/` or `spec/` folder
+2. Multiple candidates: **With Mitto UI**: `mitto_ui_options_combo` to select. **Without**: list and ask.
+3. No folder exists: **With Mitto UI**: `mitto_ui_ask_yes_no` to create `specs/`. **Without**: ask permission.
+4. Create file with short descriptive name (e.g., `user-auth.md`)
 
-2. **If multiple candidates exist:**
-   - **Using Mitto UI tools (if available):** Use `mitto_ui_options_combo` to let the user select:
-     ```
-     Question: "Multiple spec folders found. Which one should I use?"
-     Options: ["specs/", "spec/", "docs/specs/", ...]
-     ```
-   - **Fallback:** List the options in conversation and ask which one to use
-
-3. **If no spec folder exists:**
-   - **Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to ask for permission:
-     ```
-     Question: "No specs folder found. Should I create a 'specs/' directory?"
-     ```
-   - **Fallback:** Ask permission in conversation to create a `specs/` folder
-
-4. Create the spec file with a descriptive but short name (e.g., `user-auth.md`, `payment-flow.md`)
-5. Write the specification using the template above
-
+</instructions>

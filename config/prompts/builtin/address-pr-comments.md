@@ -1,216 +1,150 @@
 ---
 name: "Address PR Comments"
 description: "Systematically address all pull request review feedback"
+group: "Submission of changes"
 backgroundColor: "#B2DFDB"
 ---
 
-Address all review comments on the current pull request with thoughtful responses and appropriate code changes.
+<task>
+Address all review comments on the current pull request with thoughtful responses and code changes.
+</task>
 
-### 1. Identify the Pull/Merge Request
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-**Detect the active PR/MR:**
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
+
+**Optional tools:**
+- `mitto_ui_ask_yes_no`
+- `mitto_conversation_get_current`
+- `mitto_conversation_new`
+- `mitto_children_tasks_wait`
+- `mitto_children_tasks_report`
+- `mitto_conversation_delete`
+
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
+
+---
+
+<instructions>
+
+### 1. Identify the PR/MR
 
 ```bash
-# Get current branch
 git branch --show-current
-
-# GitHub: Check for associated PR
-gh pr status
-
-# GitLab: Check for associated MR
-glab mr view
+gh pr status          # GitHub
+glab mr view          # GitLab
 ```
 
-If multiple PRs/MRs or none found, list recent ones or ask the user to specify which to work on (by number or URL).
+If multiple or none found, ask the user to specify.
 
-### 2. Retrieve All Review Comments
-
-**Fetch comprehensive feedback:**
+### 2. Retrieve All Comments
 
 ```bash
-# GitHub: Get PR details and all comments
-gh pr view <pr-number> --json reviews,comments,reviewThreads
-
-# GitLab: Get MR details and discussions
-glab mr view <mr-number> --comments
+gh pr view <number> --json reviews,comments,reviewThreads   # GitHub
+glab mr view <number> --comments                             # GitLab
 ```
 
-**Categorize comments by type:**
-- **Review comments**: General feedback on the PR
-- **Inline code comments**: Specific line-by-line suggestions
-- **Conversation threads**: Multi-comment discussions
-- **Change requests**: Blocking issues requiring resolution
-- **Approvals with comments**: Non-blocking suggestions
+Categorize: review comments, inline code comments, conversation threads, change requests, approvals with comments.
 
 ### 3. Analyze Each Comment
 
-For every comment, carefully evaluate:
-
-**Understanding the concern:**
-- What specific issue is being raised?
-- What is the underlying motivation or principle?
-- Is this about correctness, style, performance, maintainability, or security?
-
-**Assessing validity:**
-- Is the concern technically valid?
-- Does it align with project conventions and best practices?
-- Is there context the reviewer might be missing?
-
-**Determining priority:**
-- **Blocking**: Must be addressed before merge (change requests, critical bugs)
-- **Important**: Should be addressed (valid concerns, best practices)
-- **Optional**: Nice-to-have improvements (minor style, suggestions)
-- **Discussion**: Requires clarification or debate
+For each, evaluate:
+- **Concern**: What issue is raised? Correctness, style, performance, security?
+- **Validity**: Is it technically valid? Aligned with project conventions? Missing context?
+- **Priority**: Blocking (must fix) / Important (should fix) / Optional (nice-to-have) / Discussion (needs clarification)
 
 ### 4. Formulate Responses
 
-For each comment, determine the appropriate action:
+- **Agree**: Acknowledge, implement fix, reply with "✅ Fixed in [hash]"
+- **Need clarification**: Ask specific questions, provide context
+- **Disagree**: Acknowledge perspective, explain reasoning with evidence, offer alternatives
+- **Already addressed**: Point to relevant code/commit
 
-**If the concern is valid and you agree:**
-- Acknowledge: "Good catch! This is indeed problematic because..."
-- Commit to action: "I'll update this to..."
-- Implement the fix or improvement
-- Reply with: "✅ Fixed in [commit hash]. Now it..."
-
-**If clarification is needed:**
-- Ask specific questions: "Could you clarify whether you mean X or Y?"
-- Provide context: "I implemented it this way because... Does that address your concern?"
-- Wait for response before making changes
-
-**If you respectfully disagree:**
-- Acknowledge the perspective: "I understand the concern about..."
-- Explain your reasoning: "However, I chose this approach because..."
-- Provide supporting evidence: code examples, documentation, performance data
-- Offer alternatives: "Would you prefer if we... instead?"
-- Be open to discussion
-
-**If it's already addressed:**
-- Point to the relevant code or commit
-- Explain: "This was addressed in [commit/line], where..."
-- Ask if the resolution is satisfactory
-
-If any question arises, please ask me for confirmation before proceeding.
+Ask me for confirmation if any question arises.
 
 ### 5. Group and Prioritize
 
-**Organize comments strategically:**
+1. Group related comments (multiple about same issue)
+2. Identify dependencies (some fixes resolve multiple comments)
+3. Prioritize: blocking first, related changes together, independent in parallel
 
-1. **Group related comments**: Multiple comments about the same issue
-2. **Identify dependencies**: Some fixes may resolve multiple comments
-3. **Prioritize execution**:
-   - Critical/blocking issues first
-   - Related changes together (avoid multiple commits for same area)
-   - Independent changes can be done in parallel
-
-Summarize the analysis in a table, formatted as Markdown:
+<output_format>
 
 | Comment | Type | Validity | Priority | Action |
 |---------|------|----------|----------|--------|
 | ...     | ...  | ...      | ...      | ...    |
 
-Show it to the user.
+</output_format>
 
-**Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to confirm the analysis:
-```
-Question: "Does this analysis look correct? Ready to proceed with the proposed actions?"
-Yes label: "Proceed"
-No label: "Let me review"
-```
-
-**Fallback (if Mitto UI tools are not available):**
-
-Ask for confirmation in conversation before proceeding (the user could have some comments about this analysis).
+**With Mitto UI**: `mitto_ui_ask_yes_no` → "Does this analysis look correct?"
+**Without**: Ask in conversation for confirmation.
 
 ### 6. Implement Changes
 
-For each required code change:
+Per change:
+1. Make the change
+2. Run relevant tests
+3. Commit: `fix: address review feedback on [topic]`
+4. Reply to the comment
 
-1. **Make the change** with careful attention to the feedback
-2. **Verify the fix**: Run relevant tests, check for side effects
-3. **Commit with clear message**:
+#### Delegating Significant Fixes to Child Conversations
+
+For fixes requiring **significant work** (3+ files, substantial new code, risky refactors), delegate to Mitto child conversations for parallel execution.
+
+**How to delegate (requires Mitto MCP tools):**
+
+1. `mitto_conversation_get_current(self_id: "init")` → get session_id, `available_acp_servers`
+2. Select ACP server: prefer `"coding"`/`"fast"` tagged servers for implementation tasks. Fallback: current server (`current: true`).
+3. `mitto_conversation_new`:
    ```
-   fix: address review feedback on [topic]
-   
-   - [Specific change 1] (addresses @reviewer's comment)
-   - [Specific change 2] (addresses @reviewer's comment)
+   title: "PR fix: <description>"
+   initial_prompt: |
+     Addressing a PR review comment.
+     **Repo/Branch/PR**: <context>
+     **Review comment**: <full comment>
+     **What to do**: <detailed fix description>
+     **Constraints**: Only modify related files, run tests, follow project style.
+
+     When done, report via mitto_children_tasks_report(self_id, status, summary, details).
+   acp_server: <selected server>
    ```
-4. **Update or reply to the comment** explaining what was done
+4. `mitto_children_tasks_wait(self_id, children_list, timeout_seconds: 600)`
+5. Review results, verify changes, run tests
+6. `mitto_conversation_delete` for completed children
+7. Commit combined changes
+
+**Without Mitto tools**: implement all fixes directly.
 
 ### 7. Respond to All Comments
 
-**Before pushing changes:**
-
-- Ensure every comment has a response (even if just "Acknowledged, will fix")
-- Mark conversations as resolved when appropriate
-- Leave unresolved any that need further discussion
-
-**Response best practices:**
-- Be professional and appreciative
-- Be specific about what changed
-- Include commit references when applicable
-- Ask for re-review if significant changes were made
+Before pushing:
+- Every comment has a response
+- Mark resolved conversations as appropriate
+- Leave unresolved any needing discussion
 
 ### 8. Identify Push Remote
 
-Before pushing, ensure you're pushing to the correct remote:
-
-**Check where to push:**
-
 ```bash
-# List all configured remotes
 git remote -v
-
-# Check upstream tracking for current branch
 git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null
 ```
 
-**In fork workflows:**
-- `origin` typically points to your fork (push here)
-- `upstream` points to the main repository (PR target)
-- Always push to the remote where your PR source branch lives (usually `origin`)
+In fork workflows: push to `origin` (your fork), not `upstream`. Verify via PR's `head.repo.full_name`.
 
-**Verify by checking the PR:**
+### 9. Push and Request Re-review
 
-Use the GitHub API (via `github-api` tool) to confirm:
-```
-GET /repos/{owner}/{repo}/pulls?head={username}:{current-branch}&state=open
-```
-
-The PR's `head.repo.full_name` tells you which repository your branch lives in - push to that remote.
-
-### 9. Push Changes and Request Re-review
-
-After all changes are implemented and responses are ready, confirm with the user before pushing.
-
-**Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to get push approval:
-```
-Question: "All changes implemented. Ready to push and request re-review?"
-Yes label: "Push changes"
-No label: "Wait"
-```
-
-**Fallback (if Mitto UI tools are not available):**
-
-Ask in conversation: "All changes are ready. Should I push and request re-review?"
-
-Once the user has approved, do:
+**With Mitto UI**: `mitto_ui_ask_yes_no` → "Ready to push and request re-review?"
+**Without**: Ask in conversation.
 
 ```bash
-# Ensure code is formatted (run project's formatters)
-
-# Run tests to verify nothing broke
-
-# Push changes to the correct remote (your fork in fork workflows)
 git push <push-remote> <branch-name>
-
-# Request re-review
-# GitHub: gh pr ready && gh pr comment --body "Ready for re-review"
-# GitLab: glab mr update --ready
+gh pr ready && gh pr comment --body "Ready for re-review"   # GitHub
+glab mr update --ready                                       # GitLab
 ```
 
 ### 10. Summary Report
 
-Prepare a clear summary:
+<output_format>
 
 ```console
 ✅ PR Review Comments Addressed
@@ -225,20 +159,22 @@ Prepare a clear summary:
 - [Brief description of key changes]
 
 🔗 PR: <pr-url>
-
-All comments have been responded to. The PR is ready for re-review.
 ```
 
-## Rules
+</output_format>
 
-- **Never dismiss feedback without careful consideration**
-- **Always respond to every comment** (even if just to acknowledge)
-- **Be respectful and professional** in all responses
-- **Provide evidence** when disagreeing (code, docs, benchmarks)
-- **Ask for clarification** rather than guessing intent
-- **Group related changes** in single commits when logical
-- **Run tests** before pushing to avoid introducing new issues
-- **Don't mark conversations as resolved** if you're not the author of the comment (unless explicitly asked)
-- **If a comment suggests a larger refactor**, discuss scope before implementing
-- **If feedback conflicts**, ask reviewers to align before proceeding
-- **Never assume which remote to push to** - in fork workflows, push to `origin` (your fork), not `upstream`
+</instructions>
+
+<rules>
+- Consider all feedback carefully — reviewers may have context you're missing
+- Respond to every comment
+- Provide evidence when disagreeing (code, docs, benchmarks)
+- Ask for clarification rather than guessing intent
+- Group related changes in single commits
+- Run tests before pushing
+- Only mark conversations resolved if you authored the comment (unless asked)
+- For larger refactors, discuss scope first — consider delegating to a child conversation
+- When delegating, prefer `"coding"`/`"fast"` tagged ACP servers
+- Max 4 parallel child conversations
+- In fork workflows, push to `origin`, not `upstream`
+</rules>

@@ -319,7 +319,7 @@ export function computeAllSessions(activeSessions, storedSessions) {
   const storedMap = new Map(storedSessions.map((s) => [s.session_id, s]));
 
   // Merge properties from storedSessions into activeSessions
-  // Properties like archived, name, pinned, isStreaming are shared between active and stored sessions
+  // Properties like archived, name, pinned are shared between active and stored sessions
   // Flatten acp_server and working_dir from active session's info so grouping uses the correct ACP server
   const mergedActive = activeSessions.map((s) => {
     const stored = storedMap.get(s.session_id);
@@ -335,7 +335,7 @@ export function computeAllSessions(activeSessions, storedSessions) {
     // Flatten acp_server from info so session.acp_server is set for grouping/tooltips
     const acpServer = s.acp_server || s.info?.acp_server || stored?.acp_server || "";
 
-    // Always merge stored properties (archived, name, pinned, isStreaming, periodic_enabled, next_scheduled_at, periodic_frequency) if stored session exists
+    // Always merge stored properties (archived, name, pinned, periodic_enabled, next_scheduled_at, periodic_frequency) if stored session exists
     if (stored) {
       return {
         ...s,
@@ -346,19 +346,29 @@ export function computeAllSessions(activeSessions, storedSessions) {
         archived: stored.archived,
         name: s.name || stored.name,
         pinned: stored.pinned,
-        // For isStreaming: active session takes precedence (it has real-time state),
-        // but also consider stored session's value from global events
-        isStreaming: s.isStreaming || stored.isStreaming || false,
+        // For isStreaming: active session is authoritative (per-session WebSocket has real-time state).
+        // Do NOT OR with stored.isStreaming — the global events WebSocket can deliver
+        // session_streaming events out of order, causing the sidebar dot to stay lit
+        // after the per-session WebSocket has already received prompt_complete.
+        isStreaming: s.isStreaming || false,
         // Periodic enabled state (from stored session, updated via WebSocket)
         periodic_enabled: stored.periodic_enabled || false,
         // Progress bar: next run time and frequency (from API list or WebSocket periodic_updated)
         next_scheduled_at: s.next_scheduled_at ?? stored.next_scheduled_at ?? null,
         periodic_frequency: s.periodic_frequency ?? stored.periodic_frequency ?? null,
+        // CRITICAL: Preserve parent_session_id for hierarchical conversation tree
+        parent_session_id: s.parent_session_id || stored.parent_session_id || null,
       };
     }
 
     // No stored session (e.g. newly created): always flatten so grouping uses correct workspace
-    return { ...s, working_dir: workingDir || s.working_dir, acp_server: acpServer || s.acp_server };
+    // Also preserve parent_session_id if it exists
+    return {
+      ...s,
+      working_dir: workingDir || s.working_dir,
+      acp_server: acpServer || s.acp_server,
+      parent_session_id: s.parent_session_id || null,
+    };
   });
 
   const activeIds = new Set(mergedActive.map((s) => s.session_id));
@@ -420,15 +430,25 @@ export function convertEventsToMessages(events, options = {}) {
           seq,
         });
         break;
-      case "agent_thought":
-        messages.push({
-          role: ROLE_THOUGHT,
-          text: event.data?.text || "",
-          complete: true,
-          timestamp: new Date(event.timestamp).getTime(),
-          seq,
-        });
+      case "agent_thought": {
+        // Coalesce consecutive thought events into a single message.
+        // ThoughtBuffer flushes produce separate events with different seqs,
+        // but they belong to the same logical thinking block.
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg && lastMsg.role === ROLE_THOUGHT) {
+          lastMsg.text = (lastMsg.text || "") + (event.data?.text || "");
+          lastMsg.seq = seq; // Update to latest seq
+        } else {
+          messages.push({
+            role: ROLE_THOUGHT,
+            text: event.data?.text || "",
+            complete: true,
+            timestamp: new Date(event.timestamp).getTime(),
+            seq,
+          });
+        }
         break;
+      }
       case "tool_call":
         messages.push({
           role: ROLE_TOOL,
@@ -619,6 +639,51 @@ export function isStaleClientState(clientLastSeq, serverLastSeq) {
 
   // Client is stale if it thinks it has seen more than the server has
   return clientLastSeq > serverLastSeq;
+}
+
+/**
+ * Determine if a keepalive sync should be triggered based on sequence gap.
+ * Uses different tolerance levels for streaming vs non-streaming sessions:
+ * - Streaming: tolerance=2 (avoid noise from markdown buffer delays)
+ * - Non-streaming: tolerance=0 (immediate sync to catch session_end events)
+ *
+ * @param {number} clientMaxSeq - Client's maximum sequence number
+ * @param {number} serverMaxSeq - Server's maximum sequence number from keepalive_ack
+ * @param {boolean} isStreaming - Whether the session is actively streaming
+ * @returns {boolean} True if sync should be triggered
+ */
+export function shouldSyncOnKeepalive(
+  clientMaxSeq,
+  serverMaxSeq,
+  isStreaming,
+) {
+  // Validate inputs
+  if (
+    typeof clientMaxSeq !== "number" ||
+    typeof serverMaxSeq !== "number" ||
+    clientMaxSeq < 0 ||
+    serverMaxSeq < 0
+  ) {
+    return false;
+  }
+
+  // Client ahead of server = stale state, always sync
+  if (clientMaxSeq > serverMaxSeq) {
+    return true;
+  }
+
+  // Client in sync or ahead, no sync needed
+  if (clientMaxSeq >= serverMaxSeq) {
+    return false;
+  }
+
+  // Client is behind. Apply tolerance based on streaming state.
+  // Streaming: tolerance=2 (avoid noise from markdown buffer delays)
+  // Non-streaming: tolerance=0 (immediate sync to catch session_end events)
+  const tolerance = isStreaming ? 2 : 0;
+  const gap = serverMaxSeq - clientMaxSeq;
+
+  return gap > tolerance;
 }
 
 /**

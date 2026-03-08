@@ -1,34 +1,40 @@
 ---
 name: "Propose a plan"
 description: "Create a detailed plan for the current task"
+group: "Planning"
 backgroundColor: "#BBDEFB"
 ---
 
+<investigate_before_answering>
+Explore relevant codebase parts. Read affected files and check for existing
+patterns and reusable utilities.
+</investigate_before_answering>
+
+<task>
 Create a detailed plan for the current task.
+</task>
 
-### Structure your plan as:
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-1. **Goal**: What we're trying to achieve
-2. **Current state**: What exists now, what's missing
-3. **Steps**: Numbered list of concrete actions
-   - Include file paths and function names where applicable
-   - Estimate complexity (simple/medium/complex) for each step
-   - Note dependencies between steps
-4. **Risks**: Potential issues and how to mitigate them
-5. **Verification**: How we'll know the task is complete
+**Optional tools:** `mitto_ui_ask_yes_no`
 
-Present the plan and wait for approval before executing.
+If missing, show instructions for Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
 
-**Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to get approval:
-```
-Question: "Plan is ready. Would you like me to proceed with execution?"
-Yes label: "Approve and execute"
-No label: "Modify plan"
-```
+---
 
-If the user selects "Modify plan", discuss the changes in conversation before proceeding.
+<instructions>
 
-**Fallback (if Mitto UI tools are not available):**
+### Structure
 
-Ask in conversation: "Does this plan look good? Should I proceed, or would you like to modify anything?"
+1. **Goal**: What we're achieving
+2. **Current state**: What exists, what's missing
+3. **Steps**: Numbered concrete actions with file paths, complexity estimates, dependencies
+4. **Risks**: Potential issues and mitigations
+5. **Verification**: How we'll know it's complete
 
+Present plan, wait for approval.
+
+**With Mitto UI**: `mitto_ui_ask_yes_no` → "Approve and execute / Modify plan"
+**Without**: Ask in conversation.
+
+</instructions>

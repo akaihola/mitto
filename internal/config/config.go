@@ -37,6 +37,9 @@ type ACPServer struct {
 	// AutoApprove enables automatic approval of permission requests for this ACP server.
 	// This is a per-server override; the global AutoApprove flag takes precedence if set.
 	AutoApprove bool
+	// Tags is an optional list of categorization tags for this ACP server.
+	// Tags are single words or hyphenated-words (e.g., "coding", "fast-model").
+	Tags []string
 }
 
 // GetType returns the type identifier for prompt matching.
@@ -70,6 +73,10 @@ type WebPrompt struct {
 	BackgroundColor string `json:"backgroundColor,omitempty"`
 	// Description is an optional description shown as tooltip in the UI
 	Description string `json:"description,omitempty"`
+	// Group is an optional group name for organizing prompts in the UI.
+	// Prompts with the same group will be displayed together under a group header.
+	// If empty, the prompt will appear in an "Other" section.
+	Group string `json:"group,omitempty"`
 	// Source indicates where this prompt originated from (file, settings, workspace).
 	// This is used by the frontend to determine which prompts should be saved back to settings.
 	// Only prompts with Source="settings" or empty Source should be saved.
@@ -492,6 +499,11 @@ type ConversationsConfig struct {
 	// ExternalImages contains configuration for loading external images.
 	// May be nil to use default behavior (disabled for security).
 	ExternalImages *ExternalImagesConfig `json:"external_images,omitempty" yaml:"external_images,omitempty"`
+	// DefaultFlags contains default values for advanced settings flags that will be
+	// applied to new conversations. Only flags explicitly set to true are stored.
+	// If a flag is not present in this map, the compile-time default from
+	// internal/session/flags.go is used instead.
+	DefaultFlags map[string]bool `json:"default_flags,omitempty" yaml:"default_flags,omitempty"`
 }
 
 // ActionButtonsConfig configures the follow-up suggestions feature.
@@ -947,10 +959,15 @@ type rawACPServerConfig struct {
 	Cwd     string            `yaml:"cwd"`
 	Type    string            `yaml:"type"` // Optional type for prompt matching; defaults to name
 	Env     map[string]string `yaml:"env"`  // Environment variables to set when starting the server
+	Tags    []string          `yaml:"tags"` // Optional categorization tags
 	Prompts []struct {
 		Name            string `yaml:"name"`
 		Prompt          string `yaml:"prompt"`
 		BackgroundColor string `yaml:"backgroundColor"`
+		Description     string `yaml:"description"`
+		Group           string `yaml:"group"`
+		ACPs            string `yaml:"acps"`
+		Enabled         *bool  `yaml:"enabled"`
 	} `yaml:"prompts"`
 	RestrictedRunners map[string]*WorkspaceRunnerConfig `yaml:"restricted_runners"`
 }
@@ -963,6 +980,10 @@ type rawConfig struct {
 		Name            string `yaml:"name"`
 		Prompt          string `yaml:"prompt"`
 		BackgroundColor string `yaml:"backgroundColor"`
+		Description     string `yaml:"description"`
+		Group           string `yaml:"group"`
+		ACPs            string `yaml:"acps"`
+		Enabled         *bool  `yaml:"enabled"`
 	} `yaml:"prompts"`
 	// PromptsDirs is a list of additional directories to search for prompt files
 	PromptsDirs []string `yaml:"prompts_dirs"`
@@ -1053,6 +1074,7 @@ type rawConfig struct {
 		ExternalImages *struct {
 			Enabled *bool `yaml:"enabled"`
 		} `yaml:"external_images"`
+		DefaultFlags map[string]bool `yaml:"default_flags"`
 	} `yaml:"conversations"`
 	// RestrictedRunners is the top-level per-runner-type configuration
 	RestrictedRunners map[string]*WorkspaceRunnerConfig `yaml:"restricted_runners"`
@@ -1124,13 +1146,25 @@ func Parse(data []byte) (*Config, error) {
 				Type:              server.Type, // Optional type for prompt matching
 				Env:               server.Env,  // Environment variables
 				RestrictedRunners: server.RestrictedRunners,
+				Tags:              server.Tags, // Optional categorization tags
 			}
 			// Copy server-specific prompts
 			for _, p := range server.Prompts {
+				// Skip prompts with empty name or prompt text
+				if p.Name == "" || p.Prompt == "" {
+					continue
+				}
+				// Skip disabled prompts
+				if p.Enabled != nil && !*p.Enabled {
+					continue
+				}
 				acpServer.Prompts = append(acpServer.Prompts, WebPrompt{
 					Name:            p.Name,
 					Prompt:          p.Prompt,
 					BackgroundColor: p.BackgroundColor,
+					Description:     p.Description,
+					Group:           p.Group,
+					ACPs:            p.ACPs,
 				})
 			}
 			cfg.ACPServers = append(cfg.ACPServers, acpServer)
@@ -1143,10 +1177,21 @@ func Parse(data []byte) (*Config, error) {
 
 	// Populate global prompts (top-level)
 	for _, p := range raw.Prompts {
+		// Skip prompts with empty name or prompt text
+		if p.Name == "" || p.Prompt == "" {
+			continue
+		}
+		// Skip disabled prompts
+		if p.Enabled != nil && !*p.Enabled {
+			continue
+		}
 		cfg.Prompts = append(cfg.Prompts, WebPrompt{
 			Name:            p.Name,
 			Prompt:          p.Prompt,
 			BackgroundColor: p.BackgroundColor,
+			Description:     p.Description,
+			Group:           p.Group,
+			ACPs:            p.ACPs,
 		})
 	}
 
@@ -1301,9 +1346,15 @@ func Parse(data []byte) (*Config, error) {
 			}
 		}
 
+		// Copy default flags
+		if raw.Conversations.DefaultFlags != nil {
+			cfg.Conversations.DefaultFlags = raw.Conversations.DefaultFlags
+		}
+
 		// If no config was actually set, nil out the conversations config
 		if cfg.Conversations.Processing == nil && cfg.Conversations.Queue == nil &&
-			cfg.Conversations.ActionButtons == nil && cfg.Conversations.ExternalImages == nil {
+			cfg.Conversations.ActionButtons == nil && cfg.Conversations.ExternalImages == nil &&
+			cfg.Conversations.DefaultFlags == nil {
 			cfg.Conversations = nil
 		}
 	}

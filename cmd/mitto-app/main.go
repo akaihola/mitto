@@ -16,7 +16,7 @@ package main
 
 /*
 #cgo darwin CFLAGS: -x objective-c
-#cgo darwin LDFLAGS: -framework Cocoa -framework Carbon -framework UniformTypeIdentifiers -framework UserNotifications -framework WebKit
+#cgo darwin LDFLAGS: -framework Cocoa -framework Carbon -framework UniformTypeIdentifiers -framework UserNotifications -framework WebKit -framework IOKit
 
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
@@ -26,6 +26,7 @@ package main
 #include "notifications_darwin.h"
 #include "webviewlog_darwin.h"
 #include "cache_darwin.h"
+#include "power_darwin.h"
 
 // Global hotkey reference (static to avoid duplicate symbols)
 static EventHotKeyRef gHotKeyRef = NULL;
@@ -294,7 +295,6 @@ import (
 
 	embeddedconfig "github.com/inercia/mitto/config"
 	"github.com/inercia/mitto/internal/appdir"
-	"github.com/inercia/mitto/internal/auxiliary"
 	"github.com/inercia/mitto/internal/config"
 	"github.com/inercia/mitto/internal/hooks"
 	"github.com/inercia/mitto/internal/logging"
@@ -311,6 +311,12 @@ var (
 var (
 	globalShutdown   *hooks.ShutdownManager
 	globalShutdownMu sync.Mutex
+)
+
+// Global web server reference for power management callbacks
+var (
+	globalServer   *web.Server
+	globalServerMu sync.Mutex
 )
 
 //export goMenuActionCallback
@@ -413,6 +419,19 @@ func goAppDidBecomeActiveCallback() {
 	w.Dispatch(func() {
 		w.Eval("if (window.mittoAppDidBecomeActive) window.mittoAppDidBecomeActive();")
 	})
+}
+
+//export goScreenDidSleepCallback
+func goScreenDidSleepCallback() {
+	slog.Info("[Mitto] Screen locked/slept — external listener remains active (power assertion held)")
+}
+
+//export goScreenDidWakeCallback
+func goScreenDidWakeCallback() {
+	slog.Info("[Mitto] Screen woke — triggering frontend reconnect")
+	// Reuse the existing app-became-active logic which triggers
+	// a WebSocket reconnect and session list refresh in the frontend.
+	goAppDidBecomeActiveCallback()
 }
 
 //export goSwipeNavigationCallback
@@ -536,12 +555,12 @@ func removeNotificationsForSession(sessionId string) {
 // Logs are written to ~/Library/Logs/Mitto/webview.log with rotation.
 // Returns nil on success, error on failure.
 func initWebViewLogger() error {
-	config := C.WebViewLogConfig{
+	wvLogConfig := C.WebViewLogConfig{
 		logDir:       nil,              // Use default ~/Library/Logs/Mitto
 		maxSizeBytes: 10 * 1024 * 1024, // 10MB
 		maxBackups:   3,
 	}
-	result := C.initWebViewLog(config)
+	result := C.initWebViewLog(wvLogConfig)
 	if result != 0 {
 		return fmt.Errorf("failed to initialize WebView console logger (code: %d)", result)
 	}
@@ -574,6 +593,24 @@ func getConsoleHookScript() string {
 // Should be called before creating the webview.
 func clearWebViewCache() {
 	C.clearWebViewCache()
+}
+
+// startNetworkPowerAssertion acquires a kIOPMAssertNetworkClientActive assertion
+// so macOS does not throttle or suspend the app's network activity when the
+// screen locks. Should be called when the external listener starts.
+func startNetworkPowerAssertion() error {
+	if result := C.startNetworkPowerAssertion(); result != 0 {
+		return fmt.Errorf("IOPMAssertion creation failed (code: %d)", result)
+	}
+	slog.Info("[Mitto] IOPMAssertion acquired — external listener will survive screen lock")
+	return nil
+}
+
+// stopNetworkPowerAssertion releases the IOPMAssertion acquired by
+// startNetworkPowerAssertion. Safe to call even if no assertion is held.
+func stopNetworkPowerAssertion() {
+	C.stopNetworkPowerAssertion()
+	slog.Info("[Mitto] IOPMAssertion released")
 }
 
 // setupMenu creates the native macOS menu bar with standard items.
@@ -939,9 +976,8 @@ func run() error {
 		}
 	}
 
-	// Initialize auxiliary session manager
-	auxiliary.Initialize(server.Command, nil)
-	defer auxiliary.Shutdown()
+	// Note: Auxiliary sessions are now managed by the web server's ACPProcessManager
+	// and WorkspaceAuxiliaryManager. No global initialization needed here.
 
 	// Sync login item state with config
 	// This ensures the LaunchAgent registration matches the config setting
@@ -1015,6 +1051,16 @@ func run() error {
 		return fmt.Errorf("failed to create web server: %w", err)
 	}
 
+	// Store global reference for power management callbacks
+	globalServerMu.Lock()
+	globalServer = srv
+	globalServerMu.Unlock()
+	defer func() {
+		globalServerMu.Lock()
+		globalServer = nil
+		globalServerMu.Unlock()
+	}()
+
 	// Set external port from config (used when external access is enabled via UI)
 	// Note: -1 = disabled, 0 = random port, >0 = specific port. Always set from config.
 	if cfg != nil {
@@ -1051,6 +1097,12 @@ func run() error {
 		actualExternalPort, err = srv.StartExternalListener(cfg.Web.ExternalPort)
 		if err != nil {
 			slog.Error("Failed to start external listener", "error", err)
+		} else {
+			// Acquire a power assertion so macOS does not suspend network
+			// activity when the screen locks (e.g. during Tailscale access).
+			if assertErr := startNetworkPowerAssertion(); assertErr != nil {
+				slog.Warn("Failed to acquire power assertion for external listener", "error", assertErr)
+			}
 		}
 		// Note: StartExternalListener already logs success
 	}
@@ -1211,6 +1263,13 @@ func run() error {
 		slog.Info("Two-finger swipe gesture enabled for conversation navigation")
 	})
 
+	// Register screen sleep/wake observers so we can log events and trigger
+	// frontend reconnects when the screen wakes. Must run on main thread.
+	w.Dispatch(func() {
+		C.setupScreenSleepMonitoring()
+		slog.Debug("[Mitto] Screen sleep/wake monitoring registered")
+	})
+
 	// Set up shutdown manager for graceful shutdown
 	shutdown := hooks.NewShutdownManager()
 
@@ -1233,9 +1292,9 @@ func run() error {
 
 	// Add cleanup functions
 	shutdown.AddCleanup(func(reason string) {
-		auxiliary.Shutdown()
-	})
-	shutdown.AddCleanup(func(reason string) {
+		// Release the IOPMAssertion before shutdown so macOS can resume
+		// normal power management.
+		stopNetworkPowerAssertion()
 		srv.Shutdown()
 	})
 

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/inercia/mitto/internal/auxiliary"
 	"github.com/inercia/mitto/internal/config"
 	"github.com/inercia/mitto/internal/mcpserver"
 	"github.com/inercia/mitto/internal/msghooks"
@@ -84,6 +85,19 @@ type SessionManager struct {
 	// mcpServer is the global MCP server for session registration.
 	// Sessions register with this server to enable session-scoped MCP tools.
 	mcpServer *mcpserver.Server
+
+	// acpProcessManager manages shared ACP processes, one per workspace.
+	// When set, new sessions use a shared process instead of starting their own.
+	// When nil, legacy per-session process ownership is used.
+	acpProcessManager *ACPProcessManager
+
+	// auxiliaryManager provides workspace-scoped auxiliary tasks (title generation,
+	// follow-up analysis, conversation summaries, etc.).
+	auxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
+
+	// mcpCheckedWorkspaces tracks which workspaces have had MCP availability checked.
+	mcpCheckedWorkspaces   map[string]bool
+	mcpCheckedWorkspacesMu sync.RWMutex
 }
 
 // NewSessionManager creates a new session manager with a single workspace configuration.
@@ -96,13 +110,14 @@ func NewSessionManager(acpCommand, acpServer string, autoApprove bool, logger *s
 		WorkingDir: "", // Will be set at session creation time
 	}
 	return &SessionManager{
-		sessions:         make(map[string]*BackgroundSession),
-		workspaces:       make(map[string]*config.WorkspaceSettings),
-		logger:           logger,
-		defaultWorkspace: defaultWS,
-		autoApprove:      autoApprove,
-		workspaceRCCache: config.NewWorkspaceRCCache(30 * time.Second),
-		planState:        make(map[string][]PlanEntry),
+		sessions:             make(map[string]*BackgroundSession),
+		workspaces:           make(map[string]*config.WorkspaceSettings),
+		logger:               logger,
+		defaultWorkspace:     defaultWS,
+		autoApprove:          autoApprove,
+		workspaceRCCache:     config.NewWorkspaceRCCache(30 * time.Second),
+		planState:            make(map[string][]PlanEntry),
+		mcpCheckedWorkspaces: make(map[string]bool),
 	}
 }
 
@@ -128,15 +143,16 @@ type SessionManagerOptions struct {
 // Workspaces without UUIDs will have UUIDs generated automatically.
 func NewSessionManagerWithOptions(opts SessionManagerOptions) *SessionManager {
 	sm := &SessionManager{
-		sessions:         make(map[string]*BackgroundSession),
-		workspaces:       make(map[string]*config.WorkspaceSettings),
-		logger:           opts.Logger,
-		autoApprove:      opts.AutoApprove,
-		fromCLI:          opts.FromCLI,
-		onWorkspaceSave:  opts.OnWorkspaceSave,
-		workspaceRCCache: config.NewWorkspaceRCCache(30 * time.Second),
-		apiPrefix:        opts.APIPrefix,
-		planState:        make(map[string][]PlanEntry),
+		sessions:             make(map[string]*BackgroundSession),
+		workspaces:           make(map[string]*config.WorkspaceSettings),
+		logger:               opts.Logger,
+		autoApprove:          opts.AutoApprove,
+		fromCLI:              opts.FromCLI,
+		onWorkspaceSave:      opts.OnWorkspaceSave,
+		workspaceRCCache:     config.NewWorkspaceRCCache(30 * time.Second),
+		apiPrefix:            opts.APIPrefix,
+		planState:            make(map[string][]PlanEntry),
+		mcpCheckedWorkspaces: make(map[string]bool),
 	}
 
 	for i := range opts.Workspaces {
@@ -272,6 +288,34 @@ func (sm *SessionManager) GetWorkspaceByUUID(uuid string) *config.WorkspaceSetti
 		return sm.defaultWorkspace
 	}
 	return nil
+}
+
+// GetWorkspacesForFolder returns all workspace configurations for the given folder.
+// Multiple workspaces may share the same folder with different ACP servers
+// (e.g., same project folder with Claude Code and Auggie).
+// Also includes the default workspace if its folder matches.
+func (sm *SessionManager) GetWorkspacesForFolder(folder string) []config.WorkspaceSettings {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	var result []config.WorkspaceSettings
+	seen := make(map[string]bool) // track by UUID to avoid duplicates
+
+	for _, ws := range sm.workspaces {
+		if ws.WorkingDir == folder {
+			result = append(result, *ws)
+			seen[ws.UUID] = true
+		}
+	}
+
+	// Include default workspace if it matches and hasn't been included
+	if sm.defaultWorkspace != nil && sm.defaultWorkspace.WorkingDir == folder {
+		if !seen[sm.defaultWorkspace.UUID] {
+			result = append(result, *sm.defaultWorkspace)
+		}
+	}
+
+	return result
 }
 
 // ResolveWorkspaceIdentifier resolves a workspace UUID to its WorkingDir.
@@ -543,6 +587,105 @@ func (sm *SessionManager) SetEventsManager(eventsManager *GlobalEventsManager) {
 	sm.eventsManager = eventsManager
 }
 
+// SetACPProcessManager sets the shared ACP process manager.
+// When set, new sessions use a shared ACP process per workspace instead of starting their own.
+func (sm *SessionManager) SetACPProcessManager(pm *ACPProcessManager) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.acpProcessManager = pm
+}
+
+// SetAuxiliaryManager sets the workspace-scoped auxiliary manager for title generation,
+// follow-up analysis, and other auxiliary tasks.
+func (sm *SessionManager) SetAuxiliaryManager(am *auxiliary.WorkspaceAuxiliaryManager) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.auxiliaryManager = am
+}
+
+// getSharedProcess returns the shared ACP process for the given workspace,
+// or nil if shared process management is not enabled.
+// The caller must NOT hold sm.mu when calling this method.
+func (sm *SessionManager) getSharedProcess(workspace *config.WorkspaceSettings, r *runner.Runner) *SharedACPProcess {
+	sm.mu.RLock()
+	pm := sm.acpProcessManager
+	sm.mu.RUnlock()
+
+	if pm == nil || workspace == nil || workspace.UUID == "" {
+		return nil
+	}
+
+	process, err := pm.GetOrCreateProcess(workspace, r)
+	if err != nil {
+		if sm.logger != nil {
+			sm.logger.Warn("Failed to get shared ACP process, falling back to per-session",
+				"workspace_uuid", workspace.UUID,
+				"error", err)
+		}
+		return nil
+	}
+	return process
+}
+
+// BroadcastSessionCreated broadcasts a session_created event to all connected clients.
+// This is called when a new session is created (via HTTP API or MCP tools).
+func (sm *SessionManager) BroadcastSessionCreated(sessionID, name, acpServer, workingDir, parentSessionID string) {
+	sm.mu.RLock()
+	em := sm.eventsManager
+	sm.mu.RUnlock()
+
+	if em == nil {
+		return
+	}
+
+	sessionData := map[string]interface{}{
+		"session_id":  sessionID,
+		"name":        name,
+		"acp_server":  acpServer,
+		"working_dir": workingDir,
+		"status":      "active",
+	}
+
+	// Include parent_session_id if this is a child session
+	if parentSessionID != "" {
+		sessionData["parent_session_id"] = parentSessionID
+	}
+
+	em.Broadcast(WSMsgTypeSessionCreated, sessionData)
+
+	if sm.logger != nil {
+		sm.logger.Debug("Broadcast session created",
+			"session_id", sessionID,
+			"name", name,
+			"parent_session_id", parentSessionID,
+			"clients", em.ClientCount())
+	}
+}
+
+// BroadcastSessionArchived broadcasts a session_archived event to all connected clients.
+// This is called when a session is archived or unarchived (via HTTP API or MCP tools).
+func (sm *SessionManager) BroadcastSessionArchived(sessionID string, archived bool) {
+	sm.mu.RLock()
+	em := sm.eventsManager
+	sm.mu.RUnlock()
+
+	if em == nil {
+		return
+	}
+
+	em.Broadcast(WSMsgTypeSessionArchived, map[string]interface{}{
+		"session_id": sessionID,
+		"archived":   archived,
+	})
+
+	if sm.logger != nil {
+		sm.logger.Debug("Broadcast session archived",
+			"session_id", sessionID,
+			"archived", archived,
+			"clients", em.ClientCount())
+	}
+}
+
 // SetGlobalMCPServer sets the global MCP server for session registration.
 // Sessions will register with this server to enable session-scoped MCP tools.
 func (sm *SessionManager) SetGlobalMCPServer(srv *mcpserver.Server) {
@@ -614,6 +757,8 @@ func (sm *SessionManager) CreateSession(name, workingDir string) (*BackgroundSes
 // CreateSessionWithWorkspace creates a new session using the specified workspace configuration.
 // If workspace is nil, looks up the workspace by workingDir or uses the default.
 func (sm *SessionManager) CreateSessionWithWorkspace(name, workingDir string, workspace *config.WorkspaceSettings) (*BackgroundSession, error) {
+	createStart := time.Now()
+
 	sm.mu.Lock()
 	if len(sm.sessions) >= MaxSessions {
 		sm.mu.Unlock()
@@ -656,6 +801,16 @@ func (sm *SessionManager) CreateSessionWithWorkspace(name, workingDir string, wo
 		}
 	}
 	sm.mu.Unlock()
+
+	// Debug logging for workspace UUID
+	if sm.logger != nil {
+		sm.logger.Debug("CreateSessionWithWorkspace",
+			"working_dir", workingDir,
+			"workspace_uuid", workspaceUUID,
+			"acp_server", acpServer,
+			"found_workspace", foundWs != nil,
+			"using_default", foundWs == nil && sm.defaultWorkspace != nil)
+	}
 
 	// Load workspace-specific conversation config and merge with global
 	var workspaceConv *config.ConversationsConfig
@@ -735,6 +890,21 @@ func (sm *SessionManager) CreateSessionWithWorkspace(name, workingDir string, wo
 		}
 	}
 
+	// Resolve shared ACP process for this workspace (if shared mode is enabled)
+	effectiveWs := workspace
+	if effectiveWs == nil {
+		effectiveWs = foundWs
+	}
+	if effectiveWs == nil {
+		effectiveWs = sm.defaultWorkspace
+	}
+	sharedProcessStart := time.Now()
+	sharedProcess := sm.getSharedProcess(effectiveWs, r)
+	sharedProcessDuration := time.Since(sharedProcessStart)
+
+	configDuration := time.Since(createStart)
+
+	newBsStart := time.Now()
 	bs, err := NewBackgroundSession(BackgroundSessionConfig{
 		ACPCommand:          acpCommand,
 		ACPCwd:              acpCwd,
@@ -752,7 +922,10 @@ func (sm *SessionManager) CreateSessionWithWorkspace(name, workingDir string, wo
 		FileLinksConfig:     fileLinksConfig,
 		APIPrefix:           sm.apiPrefix,
 		WorkspaceUUID:       workspaceUUID,
+		MittoConfig:         sm.mittoConfig, // Pass config for default flags
 		GlobalMCPServer:     sm.mcpServer,
+		AuxiliaryManager:    sm.auxiliaryManager,
+		SharedProcess:       sharedProcess, // Shared ACP process (nil = legacy mode)
 		OnStreamingStateChanged: func(sessionID string, isStreaming bool) {
 			if sm.eventsManager != nil {
 				sm.eventsManager.Broadcast(WSMsgTypeSessionStreaming, map[string]interface{}{
@@ -794,13 +967,20 @@ func (sm *SessionManager) CreateSessionWithWorkspace(name, workingDir string, wo
 	sm.sessions[bs.GetSessionID()] = bs
 	sm.mu.Unlock()
 
+	newBsDuration := time.Since(newBsStart)
+
 	if sm.logger != nil {
-		sm.logger.Debug("Created background session",
+		sm.logger.Info("CreateSessionWithWorkspace timing",
 			"session_id", bs.GetSessionID(),
 			"acp_id", bs.GetACPID(),
 			"acp_server", acpServer,
 			"working_dir", workingDir,
-			"total_sessions", len(sm.sessions))
+			"total_sessions", len(sm.sessions),
+			"total_ms", time.Since(createStart).Milliseconds(),
+			"config_and_shared_process_ms", configDuration.Milliseconds(),
+			"shared_process_lookup_ms", sharedProcessDuration.Milliseconds(),
+			"new_background_session_ms", newBsDuration.Milliseconds(),
+			"shared_process", sharedProcess != nil)
 	}
 
 	// Notify about runner fallback if it occurred
@@ -1051,6 +1231,13 @@ func (sm *SessionManager) ResumeSession(sessionID, sessionName, workingDir strin
 		}
 	}
 
+	// Resolve shared ACP process for this workspace (if shared mode is enabled)
+	resumeWs := foundWs
+	if resumeWs == nil {
+		resumeWs = sm.defaultWorkspace
+	}
+	sharedProcess := sm.getSharedProcess(resumeWs, r)
+
 	// Create a background session with the existing persisted session ID
 	// Pass the ACP session ID for potential server-side resumption
 	bs, err := ResumeBackgroundSession(BackgroundSessionConfig{
@@ -1073,6 +1260,8 @@ func (sm *SessionManager) ResumeSession(sessionID, sessionName, workingDir strin
 		APIPrefix:           sm.apiPrefix,
 		WorkspaceUUID:       workspaceUUID,
 		GlobalMCPServer:     sm.mcpServer,
+		AuxiliaryManager:    sm.auxiliaryManager,
+		SharedProcess:       sharedProcess, // Shared ACP process (nil = legacy mode)
 		OnStreamingStateChanged: func(sessionID string, isStreaming bool) {
 			if sm.eventsManager != nil {
 				sm.eventsManager.Broadcast(WSMsgTypeSessionStreaming, map[string]interface{}{
@@ -1209,10 +1398,16 @@ func (sm *SessionManager) CloseAll(reason string) {
 		sessions = append(sessions, bs)
 	}
 	sm.sessions = make(map[string]*BackgroundSession)
+	pm := sm.acpProcessManager
 	sm.mu.Unlock()
 
 	for _, bs := range sessions {
 		bs.Close(reason)
+	}
+
+	// Close the shared ACP process manager after all sessions are closed
+	if pm != nil {
+		pm.Close()
 	}
 
 	if sm.logger != nil {
@@ -1384,4 +1579,38 @@ func (sm *SessionManager) ProcessPendingQueues() {
 			}
 		}(bs, meta.SessionID)
 	}
+}
+
+// GetWorkspaceUUIDForSession returns the workspace UUID for a given session ID.
+// Returns empty string if the session is not found.
+func (sm *SessionManager) GetWorkspaceUUIDForSession(sessionID string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	if bs, ok := sm.sessions[sessionID]; ok {
+		return bs.workspaceUUID
+	}
+	return ""
+}
+
+// IsMCPChecked returns whether MCP availability has been checked for a workspace.
+func (sm *SessionManager) IsMCPChecked(workspaceUUID string) bool {
+	sm.mcpCheckedWorkspacesMu.RLock()
+	defer sm.mcpCheckedWorkspacesMu.RUnlock()
+	return sm.mcpCheckedWorkspaces[workspaceUUID]
+}
+
+// MarkMCPChecked marks a workspace as having had MCP availability checked.
+func (sm *SessionManager) MarkMCPChecked(workspaceUUID string) {
+	sm.mcpCheckedWorkspacesMu.Lock()
+	sm.mcpCheckedWorkspaces[workspaceUUID] = true
+	sm.mcpCheckedWorkspacesMu.Unlock()
+}
+
+// ClearMCPChecked clears the MCP checked flag for a workspace.
+// This should be called after running the MCP installation command.
+func (sm *SessionManager) ClearMCPChecked(workspaceUUID string) {
+	sm.mcpCheckedWorkspacesMu.Lock()
+	delete(sm.mcpCheckedWorkspaces, workspaceUUID)
+	sm.mcpCheckedWorkspacesMu.Unlock()
 }

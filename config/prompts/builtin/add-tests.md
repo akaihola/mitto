@@ -1,29 +1,45 @@
 ---
 name: "Add tests"
 description: "Write comprehensive tests for new or modified code"
+group: "Testing"
 backgroundColor: "#FFE0B2"
 ---
 
+<investigate_before_answering>
+Read the modified code and existing test files to understand testing conventions.
+</investigate_before_answering>
+
+<task>
 Write comprehensive tests for the code we created or modified.
+</task>
 
-### Include tests for:
+<scope>
+Test code that was actually changed. Verify real behavior, not implementation
+details. Use general assertions, not hard-coded values.
+</scope>
 
-1. **Happy path**: Normal expected usage
-2. **Edge cases**: Empty inputs, boundary values, maximum sizes
-3. **Error cases**: Invalid inputs, missing data, permission errors
-4. **Concurrency**: Race conditions, deadlocks (if applicable)
-5. **Integration**: Interaction with dependencies
+<instructions>
 
-### Test structure:
+### Coverage:
 
-- Use descriptive test names that explain the scenario
-- Follow Arrange-Act-Assert pattern
+1. Happy path
+2. Edge cases (empty inputs, boundaries, max sizes)
+3. Error cases (invalid inputs, missing data, permission errors)
+4. Concurrency (race conditions, deadlocks — if applicable)
+5. Integration with dependencies
+
+### Structure:
+
+- Descriptive test names explaining the scenario
+- Arrange-Act-Assert pattern
 - One assertion per test when possible
-- Use parameterized/data-driven tests for multiple similar cases
-- Mock external dependencies appropriately
-- Follow the project's existing testing conventions and patterns
+- Parameterized tests for similar cases
+- Mock external dependencies
+- Follow project's existing conventions
 
 ### After writing:
 
-- Run the tests and verify they pass
-- Check coverage of the new/modified code
+- Run tests, verify they pass
+- Check coverage of new/modified code
+
+</instructions>

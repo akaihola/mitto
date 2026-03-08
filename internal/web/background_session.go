@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/coder/acp-go-sdk"
@@ -40,6 +41,18 @@ type BackgroundSession struct {
 	acpConn   *acp.ClientSideConnection
 	acpClient *WebClient
 	acpWait   func() error // cleanup function from runner.RunWithPipes or cmd.Wait
+
+	// ACP process death detection (Fix A: faster crash detection)
+	// acpProcessDone is closed when the ACP OS process exits, providing sub-second
+	// detection of process death. This is faster than acpConn.Done() which only
+	// closes when the JSON-RPC transport layer detects EOF — which may be delayed
+	// if the ACP wrapper process stays alive after the inner CLI subprocess dies.
+	// See: claude-code-agent-sdk DEFAULT_CONTROL_REQUEST_TIMEOUT (60s)
+	acpProcessDone     chan struct{} // Closed when ACP OS process exits
+	acpProcessDoneOnce sync.Once     // Ensures acpProcessDone is closed exactly once
+
+	// ACP agent capabilities (set during initialization)
+	agentSupportsImages bool // True if agent advertises prompt_image capability
 
 	// Session persistence
 	recorder *session.Recorder
@@ -135,6 +148,9 @@ type BackgroundSession struct {
 	// Sessions register with this server to enable session-scoped MCP tools.
 	globalMcpServer *mcpserver.Server
 
+	// Auxiliary manager for workspace-scoped auxiliary tasks
+	auxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
+
 	// Active UI prompt state for MCP tool user prompts
 	// When an MCP tool calls Prompt(), this holds the pending prompt until the user responds
 	activePromptMu sync.Mutex
@@ -170,6 +186,9 @@ type BackgroundSessionConfig struct {
 	APIPrefix           string                      // URL prefix for API endpoints (for HTTP file links)
 	WorkspaceUUID       string                      // Workspace UUID for secure file links
 
+	// MittoConfig is the full Mitto configuration (used for default flags)
+	MittoConfig *config.Config
+
 	// OnStreamingStateChanged is called when the session's streaming state changes.
 	// It's called with true when streaming starts (user sends prompt) and false when it ends.
 	OnStreamingStateChanged func(sessionID string, isStreaming bool)
@@ -187,6 +206,13 @@ type BackgroundSessionConfig struct {
 	// Sessions register with this server to enable session-scoped MCP tools.
 	// If nil, per-session MCP server is used as fallback (legacy behavior).
 	GlobalMCPServer *mcpserver.Server
+
+	// AuxiliaryManager is the workspace-scoped auxiliary manager for title generation,
+	// follow-up analysis, and other auxiliary tasks.
+	AuxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
+
+	// SharedProcess is the shared ACP process for this workspace (nil = legacy per-session process).
+	SharedProcess *SharedACPProcess
 }
 
 // NewBackgroundSession creates a new background session.
@@ -213,9 +239,10 @@ func NewBackgroundSession(cfg BackgroundSessionConfig) (*BackgroundSession, erro
 		onStreamingStateChanged: cfg.OnStreamingStateChanged,
 		onPlanStateChanged:      cfg.OnPlanStateChanged,
 		onConfigChanged:         cfg.OnConfigOptionChanged,
-		acpCommand:              cfg.ACPCommand,      // Store for restart
-		acpCwd:                  cfg.ACPCwd,          // Store for restart
-		globalMcpServer:         cfg.GlobalMCPServer, // Global MCP server for session registration
+		acpCommand:              cfg.ACPCommand,       // Store for restart
+		acpCwd:                  cfg.ACPCwd,           // Store for restart
+		globalMcpServer:         cfg.GlobalMCPServer,  // Global MCP server for session registration
+		auxiliaryManager:        cfg.AuxiliaryManager, // Workspace-scoped auxiliary manager
 	}
 	// Initialize condition variable for prompt completion waiting
 	bs.promptCond = sync.NewCond(&bs.promptMu)
@@ -225,11 +252,11 @@ func NewBackgroundSession(cfg BackgroundSessionConfig) (*BackgroundSession, erro
 		bs.recorder = session.NewRecorder(cfg.Store)
 		bs.persistedID = bs.recorder.SessionID()
 		bs.store = cfg.Store
-		if err := bs.recorder.Start(cfg.ACPServer, cfg.WorkingDir); err != nil {
+		if err := bs.recorder.Start(cfg.ACPServer, cfg.WorkingDir, cfg.WorkspaceUUID); err != nil {
 			cancel()
 			return nil, err
 		}
-		// Update session name and runner info
+		// Update session name, runner info, and default flags
 		runnerType := "exec"
 		isRestricted := false
 		if cfg.Runner != nil {
@@ -242,6 +269,33 @@ func NewBackgroundSession(cfg BackgroundSessionConfig) (*BackgroundSession, erro
 			}
 			meta.RunnerType = runnerType
 			meta.RunnerRestricted = isRestricted
+
+			// Initialize AdvancedSettings with configured default flags
+			// Only apply defaults for new sessions (not resumed sessions)
+			if meta.AdvancedSettings == nil {
+				meta.AdvancedSettings = make(map[string]bool)
+			}
+
+			// Apply configured default flags from config
+			if cfg.MittoConfig != nil && cfg.MittoConfig.Conversations != nil {
+				for flagName, flagValue := range cfg.MittoConfig.Conversations.DefaultFlags {
+					// Only set the flag if it's not already set (preserve existing values)
+					if _, exists := meta.AdvancedSettings[flagName]; !exists {
+						meta.AdvancedSettings[flagName] = flagValue
+					}
+				}
+			}
+
+			// Apply compile-time defaults for flags not explicitly configured
+			// This ensures all flags have a value (either from config or compile-time default)
+			for _, flagDef := range session.AvailableFlags {
+				if _, exists := meta.AdvancedSettings[flagDef.Name]; !exists {
+					// Only set if the compile-time default is true (false is the zero value)
+					if flagDef.Default {
+						meta.AdvancedSettings[flagDef.Name] = true
+					}
+				}
+			}
 		})
 
 		// Initialize nextSeq from MaxSeq if available, otherwise from EventCount
@@ -341,9 +395,10 @@ func ResumeBackgroundSession(config BackgroundSessionConfig) (*BackgroundSession
 		onStreamingStateChanged: config.OnStreamingStateChanged,
 		onPlanStateChanged:      config.OnPlanStateChanged,
 		onConfigChanged:         config.OnConfigOptionChanged,
-		acpCommand:              config.ACPCommand,      // Store for restart
-		acpCwd:                  config.ACPCwd,          // Store for restart
-		globalMcpServer:         config.GlobalMCPServer, // Global MCP server for session registration
+		acpCommand:              config.ACPCommand,       // Store for restart
+		acpCwd:                  config.ACPCwd,           // Store for restart
+		globalMcpServer:         config.GlobalMCPServer,  // Global MCP server for session registration
+		auxiliaryManager:        config.AuxiliaryManager, // Workspace-scoped auxiliary manager
 	}
 	// Initialize condition variable for prompt completion waiting
 	bs.promptCond = sync.NewCond(&bs.promptMu)
@@ -602,6 +657,12 @@ func (bs *BackgroundSession) CreatedAt() time.Time {
 // May return nil if no queue config is set (use defaults in that case).
 func (bs *BackgroundSession) GetQueueConfig() *config.QueueConfig {
 	return bs.queueConfig
+}
+
+// AgentSupportsImages returns whether the ACP agent advertised image prompt support.
+// This is determined during agent initialization from AgentCapabilities.PromptCapabilities.Image.
+func (bs *BackgroundSession) AgentSupportsImages() bool {
+	return bs.agentSupportsImages
 }
 
 // --- Observer Management ---
@@ -867,9 +928,11 @@ func (bs *BackgroundSession) buildPromptWithHistory(message string) string {
 // killACPProcess terminates the ACP process and cleans up resources.
 // It handles both direct execution (acpCmd) and runner-based execution.
 func (bs *BackgroundSession) killACPProcess() {
-	// Kill direct process if using one
+	// Kill the entire process group to ensure all child processes are terminated.
+	// Without this, child processes (e.g., "claude" spawned by "node claude-code-acp")
+	// survive and become orphans.
 	if bs.acpCmd != nil && bs.acpCmd.Process != nil {
-		bs.acpCmd.Process.Kill()
+		mittoAcp.KillProcessGroup(bs.acpCmd.Process.Pid)
 	}
 
 	// Call wait() to clean up resources (from runner.RunWithPipes or cmd.Wait)
@@ -882,10 +945,16 @@ func (bs *BackgroundSession) killACPProcess() {
 
 // maxACPStartRetries is the maximum number of times to retry starting the ACP process
 // if the initial connection fails (e.g., "peer disconnected before response").
-const maxACPStartRetries = 2
+const maxACPStartRetries = 3
 
-// acpStartRetryDelay is the delay between ACP start retries.
-const acpStartRetryDelay = 500 * time.Millisecond
+// acpStartRetryBaseDelay is the initial delay between ACP start retries.
+const acpStartRetryBaseDelay = 500 * time.Millisecond
+
+// acpStartRetryMaxDelay is the maximum delay between ACP start retries.
+const acpStartRetryMaxDelay = 4 * time.Second
+
+// acpStartRetryJitterRatio is the jitter ratio (±) applied to retry delays.
+const acpStartRetryJitterRatio = 0.3
 
 // maxACPRestarts is the maximum number of automatic restarts allowed within acpRestartWindow.
 // If this limit is exceeded, the user must manually restart the session.
@@ -894,6 +963,18 @@ const maxACPRestarts = 3
 // acpRestartWindow is the time window for counting restart attempts.
 // Restarts older than this are not counted toward the limit.
 const acpRestartWindow = 5 * time.Minute
+
+// acpRestartBaseDelay is the initial delay between runtime restart attempts.
+// This is intentionally longer than the start-retry delay to give the system
+// time to recover from transient conditions (e.g., notification queue overflow
+// due to backpressure from slow WebSocket clients).
+const acpRestartBaseDelay = 3 * time.Second
+
+// acpRestartMaxDelay is the maximum delay between runtime restart attempts.
+// With exponential backoff (3s → 6s → 12s → 24s → 30s), this prevents
+// rapid crash loops that burn resources without letting the underlying
+// condition (e.g., client backpressure) resolve.
+const acpRestartMaxDelay = 30 * time.Second
 
 // canRestartACP checks if we can restart the ACP process based on rate limiting.
 // Returns true if restart is allowed, false if we've exceeded the limit.
@@ -927,17 +1008,66 @@ func (bs *BackgroundSession) recordRestart() {
 	bs.restartTimes = append(bs.restartTimes, time.Now())
 }
 
+// getRestartInfo returns a human-readable restart attempt indicator like "(attempt 2 of 3)".
+// This is shown to the user so they understand the system is in a retry loop and won't retry forever.
+// This method is thread-safe.
+func (bs *BackgroundSession) getRestartInfo() string {
+	bs.restartMu.Lock()
+	defer bs.restartMu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-acpRestartWindow)
+	count := 0
+	for _, t := range bs.restartTimes {
+		if t.After(cutoff) {
+			count++
+		}
+	}
+	// count is the number of recent restarts already done; the next one will be count+1
+	return fmt.Sprintf("(attempt %d of %d)", count+1, maxACPRestarts)
+}
+
 // restartACPProcess attempts to restart the ACP process after it has died.
 // It kills the old process, cleans up resources, and starts a new one.
 // The new process will attempt to resume the ACP session if the agent supports it.
 // Returns nil on success, or an error if restart fails.
+// Returns an *ACPClassifiedError for permanent failures.
 func (bs *BackgroundSession) restartACPProcess() error {
+	// Apply backoff based on how many recent restarts have occurred.
+	bs.restartMu.Lock()
+	recentCount := len(bs.restartTimes)
+	bs.restartMu.Unlock()
+
+	if recentCount > 0 {
+		delay := backoffDelay(recentCount-1, acpRestartBaseDelay, acpRestartMaxDelay, acpStartRetryJitterRatio)
+		if bs.logger != nil {
+			bs.logger.Info("Waiting before ACP restart",
+				"delay", delay.String(),
+				"recent_restarts", recentCount,
+				"session_id", bs.persistedID,
+				"command", bs.acpCommand,
+				"cwd", bs.acpCwd)
+		}
+		select {
+		case <-bs.ctx.Done():
+			return &sessionError{"context cancelled during restart backoff"}
+		case <-time.After(delay):
+		}
+	}
+
 	if bs.logger != nil {
 		bs.logger.Info("Restarting ACP process",
 			"session_id", bs.persistedID,
 			"acp_id", bs.acpID,
-			"restart_count", bs.restartCount+1)
+			"restart_count", bs.restartCount+1,
+			"command", bs.acpCommand,
+			"cwd", bs.acpCwd)
 	}
+
+	// Unregister from global MCP server before killing the old process.
+	// Without this, the re-registration during startACPProcess() fails with
+	// "session already registered" because the old registration is still present.
+	bs.stopSessionMcpServer()
 
 	// Kill the old process and clean up
 	bs.killACPProcess()
@@ -958,9 +1088,17 @@ func (bs *BackgroundSession) restartACPProcess() error {
 	err := bs.startACPProcess(bs.acpCommand, bs.acpCwd, bs.workingDir, bs.acpID)
 	if err != nil {
 		if bs.logger != nil {
-			bs.logger.Error("Failed to restart ACP process",
+			logAttrs := []any{
 				"session_id", bs.persistedID,
-				"error", err)
+				"error", err,
+			}
+			if classified, ok := err.(*ACPClassifiedError); ok {
+				logAttrs = append(logAttrs,
+					"error_class", classified.Class.String(),
+					"user_message", classified.UserMessage,
+					"user_guidance", classified.UserGuidance)
+			}
+			bs.logger.Error("Failed to restart ACP process", logAttrs...)
 		}
 		return err
 	}
@@ -977,7 +1115,8 @@ func (bs *BackgroundSession) restartACPProcess() error {
 	if bs.logger != nil {
 		bs.logger.Info("ACP process restarted successfully",
 			"session_id", bs.persistedID,
-			"acp_id", bs.acpID)
+			"acp_id", bs.acpID,
+			"command", bs.acpCommand)
 	}
 
 	return nil
@@ -987,43 +1126,71 @@ func (bs *BackgroundSession) restartACPProcess() error {
 // If acpSessionID is provided and the agent supports session loading, it attempts
 // to resume that session. Otherwise, it creates a new session.
 // The acpCwd parameter sets the working directory for the ACP process itself.
-// This method includes retry logic for transient failures during startup.
+// This method includes retry logic with exponential backoff for transient failures.
+// Permanent errors (missing module, command not found, etc.) skip retries.
+// Returns an *ACPClassifiedError when the error has been classified.
 func (bs *BackgroundSession) startACPProcess(acpCommand, acpCwd, workingDir, acpSessionID string) error {
 	var lastErr error
+	var lastClassified *ACPClassifiedError
+
 	for attempt := 0; attempt < maxACPStartRetries; attempt++ {
 		if attempt > 0 {
+			delay := backoffDelay(attempt-1, acpStartRetryBaseDelay, acpStartRetryMaxDelay, acpStartRetryJitterRatio)
 			if bs.logger != nil {
 				bs.logger.Info("Retrying ACP process start",
 					"attempt", attempt+1,
 					"max_attempts", maxACPStartRetries,
-					"last_error", lastErr)
+					"delay", delay.String(),
+					"last_error", lastErr,
+					"error_class", lastClassified.Class.String(),
+					"command", acpCommand,
+					"cwd", acpCwd)
 			}
-			// Wait before retry
+			// Wait before retry with exponential backoff.
 			select {
 			case <-bs.ctx.Done():
 				return &sessionError{"context cancelled during retry: " + bs.ctx.Err().Error()}
-			case <-time.After(acpStartRetryDelay):
+			case <-time.After(delay):
 			}
 		}
 
-		err := bs.doStartACPProcess(acpCommand, acpCwd, workingDir, acpSessionID)
-		if err == nil {
+		stderr, processErr := bs.doStartACPProcess(acpCommand, acpCwd, workingDir, acpSessionID)
+		if processErr == nil {
 			return nil
 		}
-		lastErr = err
+		lastErr = processErr
 
-		// Only retry on connection/initialization failures, not on validation errors
-		if strings.Contains(err.Error(), "empty ACP command") {
-			return err // Don't retry validation errors
-		}
+		// Classify the error to determine if retrying is worthwhile.
+		lastClassified = classifyACPError(processErr, stderr)
 
 		if bs.logger != nil {
 			bs.logger.Warn("ACP process start failed",
 				"attempt", attempt+1,
-				"error", err)
+				"max_attempts", maxACPStartRetries,
+				"error", processErr,
+				"error_class", lastClassified.Class.String(),
+				"command", acpCommand,
+				"cwd", acpCwd)
+		}
+
+		// Don't retry permanent errors — they won't resolve by retrying.
+		if !lastClassified.IsRetryable() {
+			if bs.logger != nil {
+				bs.logger.Error("ACP process start failed with permanent error, skipping retries",
+					"error", processErr,
+					"user_message", lastClassified.UserMessage,
+					"user_guidance", lastClassified.UserGuidance,
+					"command", acpCommand,
+					"cwd", acpCwd)
+			}
+			return lastClassified
 		}
 	}
 
+	// All retries exhausted — return the classified error if available.
+	if lastClassified != nil {
+		return lastClassified
+	}
 	return lastErr
 }
 
@@ -1084,14 +1251,46 @@ func (c *stderrCollector) Close() {
 	c.isClosed = true
 }
 
+// stderrCrashPatterns are substrings in ACP process stderr output that indicate
+// the inner CLI subprocess has crashed. When detected, we proactively signal
+// process death via onCrashDetected callback rather than waiting for the SDK's
+// 60-second control request timeout (DEFAULT_CONTROL_REQUEST_TIMEOUT).
+//
+// Fix C: These patterns come from the claude-code-agent-sdk Rust layer which logs
+// to stderr when the CLI subprocess dies unexpectedly.
+var stderrCrashPatterns = []string{
+	"stream ended unexpectedly",
+	"EOF received from CLI stdout",
+	"background reader: stream ended",
+	"connection reset by peer",
+	"broken pipe",
+}
+
 // startStderrMonitor starts a goroutine that reads from stderr and writes to the collector.
-func startStderrMonitor(stderr runner.ReadCloser, collector *stderrCollector) {
+// If onCrashDetected is non-nil, it is called (at most once) when crash patterns are
+// detected in the stderr output, enabling early process death signaling.
+func startStderrMonitor(stderr runner.ReadCloser, collector *stderrCollector, onCrashDetected func()) {
 	go func() {
+		crashSignaled := false
 		buf := make([]byte, 4096)
 		for {
 			n, readErr := stderr.Read(buf)
 			if n > 0 {
 				collector.Write(buf[:n])
+
+				// Fix C: Check for crash patterns in stderr output.
+				// This detects inner CLI subprocess death immediately from SDK
+				// stderr messages, bypassing the 60s control request timeout.
+				if !crashSignaled && onCrashDetected != nil {
+					chunk := string(buf[:n])
+					for _, pattern := range stderrCrashPatterns {
+						if strings.Contains(chunk, pattern) {
+							crashSignaled = true
+							onCrashDetected()
+							break
+						}
+					}
+				}
 			}
 			if readErr != nil {
 				break
@@ -1101,11 +1300,21 @@ func startStderrMonitor(stderr runner.ReadCloser, collector *stderrCollector) {
 	}()
 }
 
-func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, acpSessionID string) error {
+// doStartACPProcess performs a single attempt to start the ACP process.
+// Returns the error and any captured stderr output for error classification.
+func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, acpSessionID string) (string, error) {
+	if bs.logger != nil {
+		bs.logger.Info("Starting ACP process",
+			"command", acpCommand,
+			"cwd", acpCwd,
+			"working_dir", workingDir,
+			"acp_session_id", acpSessionID)
+	}
+
 	// Parse command using shell-aware tokenization
 	args, err := mittoAcp.ParseCommand(acpCommand)
 	if err != nil {
-		return &sessionError{err.Error()}
+		return "", &sessionError{err.Error()}
 	}
 
 	var stdin runner.WriteCloser
@@ -1117,6 +1326,26 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 	// Create stderr collector to capture output for error reporting
 	// Keep last 8KB of stderr output
 	stderrCollector := newStderrCollector(8192, bs.logger)
+
+	// Pre-create the process death detection channel so the stderr monitor
+	// (started below) can signal crash detection immediately.
+	// The channel will be wired into the wait function wrapper after the process starts.
+	bs.acpProcessDone = make(chan struct{})
+	bs.acpProcessDoneOnce = sync.Once{}
+
+	// Create the crash detection callback for the stderr monitor (Fix C).
+	// When the stderr monitor detects crash patterns from the SDK (e.g., "EOF received
+	// from CLI stdout"), this callback closes acpProcessDone immediately — bypassing
+	// the SDK's 60-second control request timeout.
+	onCrashDetected := func() {
+		if bs.logger != nil {
+			bs.logger.Warn("ACP subprocess crash detected via stderr patterns",
+				"session_id", bs.persistedID)
+		}
+		bs.acpProcessDoneOnce.Do(func() {
+			close(bs.acpProcessDone)
+		})
+	}
 
 	// Use runner if configured, otherwise direct execution
 	if bs.runner != nil {
@@ -1134,11 +1363,11 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		}
 		stdin, stdout, stderr, wait, err = bs.runner.RunWithPipes(bs.ctx, args[0], args[1:], nil)
 		if err != nil {
-			return &sessionError{"failed to start with runner: " + err.Error()}
+			return "", &sessionError{"failed to start with runner: " + err.Error()}
 		}
 
-		// Monitor stderr in background
-		startStderrMonitor(stderr, stderrCollector)
+		// Monitor stderr in background (with crash detection for Fix C)
+		startStderrMonitor(stderr, stderrCollector, onCrashDetected)
 
 		// Store wait function for cleanup
 		// We'll call it in Close() method
@@ -1146,6 +1375,10 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 	} else {
 		// Direct execution (no restrictions)
 		cmd = exec.CommandContext(bs.ctx, args[0], args[1:]...)
+		// Create a new process group so we can kill all child processes on Close().
+		// Without this, child processes (e.g., "claude" spawned by "node claude-code-acp")
+		// become orphans when we kill only the direct child.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 		// Set working directory for the ACP process if specified
 		if acpCwd != "" {
@@ -1159,23 +1392,23 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
-			return &sessionError{"failed to create stdin pipe: " + err.Error()}
+			return "", &sessionError{"failed to create stdin pipe: " + err.Error()}
 		}
 		stdout, err = cmd.StdoutPipe()
 		if err != nil {
-			return &sessionError{"failed to create stdout pipe: " + err.Error()}
+			return "", &sessionError{"failed to create stdout pipe: " + err.Error()}
 		}
 		stderrPipe, err := cmd.StderrPipe()
 		if err != nil {
-			return &sessionError{"failed to create stderr pipe: " + err.Error()}
+			return "", &sessionError{"failed to create stderr pipe: " + err.Error()}
 		}
 
 		if err := cmd.Start(); err != nil {
-			return &sessionError{"failed to start ACP server: " + err.Error()}
+			return "", &sessionError{"failed to start ACP server: " + err.Error()}
 		}
 
-		// Monitor stderr in background (same as runner case)
-		startStderrMonitor(stderrPipe, stderrCollector)
+		// Monitor stderr in background (same as runner case, with crash detection for Fix C)
+		startStderrMonitor(stderrPipe, stderrCollector, onCrashDetected)
 
 		bs.acpCmd = cmd
 
@@ -1185,8 +1418,70 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		}
 	}
 
-	// Store wait function for cleanup
-	bs.acpWait = wait
+	// Store wait function for cleanup and wire process death detection.
+	//
+	// Fix A: The acpProcessDone channel was pre-created above (before stderr monitors)
+	// so that the stderr crash detector (Fix C) can signal it immediately.
+	// Here we wrap the wait function to ALSO close acpProcessDone when the OS process
+	// exits (either via killACPProcess or natural termination).
+	//
+	// Fix A+C combined detection strategy:
+	// 1. Stderr crash patterns (Fix C) — instant detection when inner CLI dies
+	//    (the SDK logs "EOF received from CLI stdout" to stderr immediately)
+	// 2. OS process liveness polling (Fix A) — 2-second detection when ACP process exits
+	// 3. Wait function wrapper (Fix A) — detection when killACPProcess() is called
+	// 4. acpConn.Done() (existing) — fallback via JSON-RPC pipe EOF detection
+	origWait := wait
+	bs.acpWait = func() error {
+		err := origWait()
+		bs.acpProcessDoneOnce.Do(func() {
+			close(bs.acpProcessDone)
+		})
+		return err
+	}
+
+	// Start process liveness monitor for direct-exec processes.
+	// This polls the process every 2 seconds using kill(pid, 0) which checks if the
+	// process exists without actually sending a signal. When the process is gone,
+	// we close acpProcessDone immediately — providing much faster detection than
+	// waiting for the pipe EOF to propagate through the JSON-RPC layer.
+	if cmd != nil && cmd.Process != nil {
+		processDoneCh := bs.acpProcessDone
+		processDoneOnce := &bs.acpProcessDoneOnce
+		pid := cmd.Process.Pid
+		sessionCtx := bs.ctx
+		logger := bs.logger
+		sessionID := bs.persistedID
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-processDoneCh:
+					// Already signaled (e.g., by killACPProcess calling acpWait)
+					return
+				case <-sessionCtx.Done():
+					return
+				case <-ticker.C:
+					// Check if process is still alive using kill(pid, 0).
+					// This returns an error if the process doesn't exist.
+					err := syscall.Kill(pid, 0)
+					if err != nil {
+						if logger != nil {
+							logger.Warn("ACP process no longer alive (detected by liveness check)",
+								"pid", pid,
+								"error", err,
+								"session_id", sessionID)
+						}
+						processDoneOnce.Do(func() {
+							close(processDoneCh)
+						})
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	// Create web client with callbacks that route to attached client or persist.
 	// BackgroundSession implements SeqProvider, so seq is assigned at ACP receive time.
@@ -1237,8 +1532,36 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		bs.acpConn.SetLogger(logging.DowngradeInfoToDebug(bs.logger))
 	}
 
+	// Create an init context that gets cancelled when the ACP process dies.
+	// This ensures we fail fast instead of waiting for the ACP server's internal
+	// 60-second control request timeout when the CLI subprocess has crashed.
+	// See: claude-code-agent-sdk DEFAULT_CONTROL_REQUEST_TIMEOUT (60s)
+	initCtx, initCancel := context.WithCancel(bs.ctx)
+	defer initCancel()
+
+	// Monitor ACP process health: if the connection's Done() channel closes
+	// or the OS process exits (acpProcessDone), cancel the init context immediately.
+	go func() {
+		select {
+		case <-bs.acpConn.Done():
+			if bs.logger != nil {
+				bs.logger.Warn("ACP connection closed during initialization, cancelling",
+					"session_id", bs.persistedID)
+			}
+			initCancel()
+		case <-bs.acpProcessDone:
+			if bs.logger != nil {
+				bs.logger.Warn("ACP process exited during initialization, cancelling",
+					"session_id", bs.persistedID)
+			}
+			initCancel()
+		case <-initCtx.Done():
+			// Initialization completed normally or was cancelled for another reason
+		}
+	}()
+
 	// Initialize and get agent capabilities
-	initResp, err := bs.acpConn.Initialize(bs.ctx, acp.InitializeRequest{
+	initResp, err := bs.acpConn.Initialize(initCtx, acp.InitializeRequest{
 		ProtocolVersion: acp.ProtocolVersionNumber,
 		ClientCapabilities: acp.ClientCapabilities{
 			Fs: acp.FileSystemCapability{
@@ -1256,6 +1579,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		if bs.logger != nil {
 			logAttrs := []any{
 				"command", acpCommand,
+				"cwd", acpCwd,
 				"working_dir", workingDir,
 				"error", err,
 			}
@@ -1266,7 +1590,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		}
 
 		bs.killACPProcess()
-		return &sessionError{"failed to initialize: " + err.Error()}
+		return stderrOutput, &sessionError{"failed to initialize: " + err.Error()}
 	}
 
 	// Log agent information at DEBUG level
@@ -1282,7 +1606,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 
 	// Try to load existing session if we have an ACP session ID and the agent supports it
 	if acpSessionID != "" && initResp.AgentCapabilities.LoadSession {
-		loadResp, err := bs.acpConn.LoadSession(bs.ctx, acp.LoadSessionRequest{
+		loadResp, err := bs.acpConn.LoadSession(initCtx, acp.LoadSessionRequest{
 			SessionId:  acp.SessionId(acpSessionID),
 			Cwd:        cwd,
 			McpServers: mcpServers,
@@ -1296,7 +1620,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 					"acp_session_id", acpSessionID)
 				bs.logSessionModes(loadResp.Modes)
 			}
-			return nil
+			return "", nil
 		}
 		// Log the error but fall through to create a new session
 		if bs.logger != nil {
@@ -1307,7 +1631,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 	}
 
 	// Create new session
-	sessResp, err := bs.acpConn.NewSession(bs.ctx, acp.NewSessionRequest{
+	sessResp, err := bs.acpConn.NewSession(initCtx, acp.NewSessionRequest{
 		Cwd:        cwd,
 		McpServers: mcpServers,
 	})
@@ -1320,6 +1644,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		if bs.logger != nil {
 			logAttrs := []any{
 				"command", acpCommand,
+				"cwd", acpCwd,
 				"working_dir", workingDir,
 				"error", err,
 			}
@@ -1330,7 +1655,7 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 		}
 
 		bs.killACPProcess()
-		return &sessionError{"failed to create session: " + err.Error()}
+		return stderrOutput, &sessionError{"failed to create session: " + err.Error()}
 	}
 
 	bs.acpID = string(sessResp.SessionId)
@@ -1340,11 +1665,12 @@ func (bs *BackgroundSession) doStartACPProcess(acpCommand, acpCwd, workingDir, a
 
 	if bs.logger != nil {
 		bs.logger.Info("Created new ACP session",
-			"acp_session_id", bs.acpID)
+			"acp_session_id", bs.acpID,
+			"command", acpCommand)
 		bs.logSessionModes(sessResp.Modes)
 	}
 
-	return nil
+	return "", nil
 }
 
 // logSessionModes logs the session modes/config options at DEBUG level.
@@ -1390,8 +1716,9 @@ func (bs *BackgroundSession) logAgentInfo(resp acp.InitializeResponse) {
 	bs.logger.Debug("ACP protocol version",
 		"protocol_version", resp.ProtocolVersion)
 
-	// Log agent capabilities
+	// Log and store agent capabilities
 	caps := resp.AgentCapabilities
+	bs.agentSupportsImages = caps.PromptCapabilities.Image
 	bs.logger.Debug("Agent capabilities",
 		"load_session", caps.LoadSession,
 		"mcp_http", caps.McpCapabilities.Http,
@@ -1432,6 +1759,16 @@ func (bs *BackgroundSession) NeedsTitle() bool {
 		return false
 	}
 	return meta.Name == ""
+}
+
+// GetWorkspaceUUID returns the workspace UUID associated with this session.
+func (bs *BackgroundSession) GetWorkspaceUUID() string {
+	return bs.workspaceUUID
+}
+
+// GetAuxiliaryManager returns the auxiliary manager associated with this session.
+func (bs *BackgroundSession) GetAuxiliaryManager() *auxiliary.WorkspaceAuxiliaryManager {
+	return bs.auxiliaryManager
 }
 
 // PromptMeta contains optional metadata about the prompt source.
@@ -1477,9 +1814,9 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 	bs.promptMu.Lock()
 	if bs.isPrompting {
 		// Check if the ACP connection is dead (process crashed)
-		// We use a non-blocking check on the Done() channel to detect this.
-		// This is more reliable than a timeout because legitimate operations
-		// (like running tests) can take a very long time.
+		// We use non-blocking checks on both Done() and acpProcessDone channels.
+		// acpProcessDone fires faster than Done() because it uses OS-level process
+		// liveness checks rather than waiting for pipe EOF propagation.
 		acpDead := false
 		if bs.acpConn != nil {
 			select {
@@ -1490,6 +1827,14 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 			}
 		} else {
 			acpDead = true // No connection at all
+		}
+		// Also check OS-level process death (faster detection)
+		if !acpDead && bs.acpProcessDone != nil {
+			select {
+			case <-bs.acpProcessDone:
+				acpDead = true
+			default:
+			}
 		}
 
 		if acpDead {
@@ -1505,22 +1850,32 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 
 			// Check if we can restart automatically
 			if bs.canRestartACP() {
-				// Notify observers that we're restarting
+				// Notify observers that we're restarting (include attempt count so
+				// the user understands this is a retry loop, not a one-off)
+				restartInfo := bs.getRestartInfo()
 				bs.notifyObservers(func(o SessionObserver) {
-					o.OnError("The AI agent process stopped unexpectedly. Restarting...")
+					o.OnError(fmt.Sprintf("The AI agent process stopped unexpectedly. Restarting %s...", restartInfo))
 				})
 
 				// Attempt to restart the ACP process
 				if err := bs.restartACPProcess(); err != nil {
+					// Provide specific guidance for permanent errors
+					errMsg := "Failed to restart the AI agent: " + err.Error() + ". Please switch to another conversation and back to retry."
+					if classified, ok := err.(*ACPClassifiedError); ok && !classified.IsRetryable() {
+						errMsg = formatClassifiedError(classified)
+					}
 					bs.notifyObservers(func(o SessionObserver) {
-						o.OnError("Failed to restart the AI agent: " + err.Error() + ". Please switch to another conversation and back to retry.")
+						o.OnError(errMsg)
 					})
 					return &sessionError{"ACP process died and restart failed: " + err.Error()}
 				}
 
-				// Restart succeeded - notify user and retry the prompt
+				// Restart succeeded - notify user to retry the prompt
+				// Note: we say "restarted" (not "restarted successfully") because the
+				// process may crash again on the next prompt — we don't want to give
+				// false confidence.
 				bs.notifyObservers(func(o SessionObserver) {
-					o.OnError("AI agent restarted successfully. Please resend your message.")
+					o.OnError("AI agent restarted. Please resend your message.")
 				})
 				return &sessionError{"ACP process restarted - please resend your message"}
 			}
@@ -1560,6 +1915,19 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 	// Load images and build content blocks
 	var imageRefs []session.ImageRef
 	var contentBlocks []acp.ContentBlock
+
+	if len(imageIDs) > 0 && !bs.agentSupportsImages {
+		if bs.logger != nil {
+			bs.logger.Warn("Agent did not advertise image support, sending images anyway",
+				"image_count", len(imageIDs),
+				"session_id", bs.persistedID)
+		}
+		// Warn the user but still send images — models sometimes misreport capabilities
+		bs.notifyObservers(func(o SessionObserver) {
+			o.OnError("⚠️ The current AI agent did not advertise image support. " +
+				"Images will be sent anyway, but may not be processed correctly.")
+		})
+	}
 
 	if len(imageIDs) > 0 && bs.store != nil {
 		for _, imageID := range imageIDs {
@@ -1733,9 +2101,65 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 	finalBlocks = append(finalBlocks, hookAttachmentBlocks...)
 	finalBlocks = append(finalBlocks, acp.TextBlock(promptMessage))
 
+	// Log content block summary for debugging image delivery issues
+	if bs.logger != nil {
+		var imageBlockCount, textBlockCount, otherBlockCount int
+		for _, block := range finalBlocks {
+			if block.Image != nil {
+				imageBlockCount++
+			} else if block.Text != nil {
+				textBlockCount++
+			} else {
+				otherBlockCount++
+			}
+		}
+		bs.logger.Info("Sending prompt to ACP agent",
+			"total_blocks", len(finalBlocks),
+			"image_blocks", imageBlockCount,
+			"text_blocks", textBlockCount,
+			"other_blocks", otherBlockCount,
+			"hook_attachment_blocks", len(hookAttachmentBlocks),
+			"agent_supports_images", bs.agentSupportsImages,
+			"session_id", bs.persistedID)
+	}
+
 	// Run prompt in background
 	go func() {
-		promptResp, err := bs.acpConn.Prompt(bs.ctx, acp.PromptRequest{
+		// Create a prompt context that gets cancelled when the ACP process dies.
+		// This ensures we fail fast instead of waiting for the ACP server's internal
+		// 60-second control request timeout when the CLI subprocess has crashed.
+		// See: claude-code-agent-sdk DEFAULT_CONTROL_REQUEST_TIMEOUT (60s)
+		promptCtx, promptCancel := context.WithCancel(bs.ctx)
+		defer promptCancel()
+
+		// Monitor ACP process health: if the connection's Done() channel closes
+		// or the OS process exits (acpProcessDone), cancel the prompt context immediately.
+		// The acpProcessDone channel provides faster detection than Done() because it
+		// uses OS-level process liveness checks (signal 0) rather than waiting for
+		// pipe EOF to propagate through the JSON-RPC transport layer.
+		if bs.acpConn != nil {
+			processDoneCh := bs.acpProcessDone // capture for goroutine
+			go func() {
+				select {
+				case <-bs.acpConn.Done():
+					if bs.logger != nil {
+						bs.logger.Warn("ACP connection closed during prompt, cancelling",
+							"session_id", bs.persistedID)
+					}
+					promptCancel()
+				case <-processDoneCh:
+					if bs.logger != nil {
+						bs.logger.Warn("ACP process exited during prompt, cancelling",
+							"session_id", bs.persistedID)
+					}
+					promptCancel()
+				case <-promptCtx.Done():
+					// Prompt completed normally or was cancelled for another reason
+				}
+			}()
+		}
+
+		promptResp, err := bs.acpConn.Prompt(promptCtx, acp.PromptRequest{
 			SessionId: acp.SessionId(bs.acpID),
 			Prompt:    finalBlocks,
 		})
@@ -1796,10 +2220,53 @@ func (bs *BackgroundSession) PromptWithMeta(message string, meta PromptMeta) err
 					"error", err.Error(),
 					"observer_count", observerCount)
 			}
-			userFriendlyErr := formatACPError(err)
-			bs.notifyObservers(func(o SessionObserver) {
-				o.OnError(userFriendlyErr)
-			})
+
+			// Check if the ACP process died (connection closed or OS process exited).
+			// If so, attempt automatic restart rather than just showing an error.
+			// We check both acpConn.Done() (JSON-RPC layer) and acpProcessDone
+			// (OS-level process liveness) for faster detection.
+			acpDead := false
+			if bs.acpConn != nil {
+				select {
+				case <-bs.acpConn.Done():
+					acpDead = true
+				default:
+				}
+			}
+			if !acpDead && bs.acpProcessDone != nil {
+				select {
+				case <-bs.acpProcessDone:
+					acpDead = true
+				default:
+				}
+			}
+
+			if acpDead && bs.canRestartACP() {
+				restartInfo := bs.getRestartInfo()
+				bs.notifyObservers(func(o SessionObserver) {
+					o.OnError(fmt.Sprintf("The AI agent process stopped unexpectedly. Restarting %s...", restartInfo))
+				})
+				if restartErr := bs.restartACPProcess(); restartErr != nil {
+					// Provide specific guidance for permanent errors
+					errMsg := "Failed to restart the AI agent: " + restartErr.Error() +
+						". Please switch to another conversation and back to retry."
+					if classified, ok := restartErr.(*ACPClassifiedError); ok && !classified.IsRetryable() {
+						errMsg = formatClassifiedError(classified)
+					}
+					bs.notifyObservers(func(o SessionObserver) {
+						o.OnError(errMsg)
+					})
+				} else {
+					bs.notifyObservers(func(o SessionObserver) {
+						o.OnError("AI agent restarted. Please resend your message.")
+					})
+				}
+			} else {
+				userFriendlyErr := formatACPError(err)
+				bs.notifyObservers(func(o SessionObserver) {
+					o.OnError(userFriendlyErr)
+				})
+			}
 		} else {
 			if bs.logger != nil {
 				bs.logger.Debug("prompt_complete",
@@ -1860,12 +2327,21 @@ func (bs *BackgroundSession) analyzeFollowUpQuestions(userPrompt, agentMessage s
 
 	bs.logger.Debug("follow-up analysis: starting",
 		"user_prompt_length", len(userPrompt),
-		"agent_message_length", len(agentMessage))
+		"agent_message_length", len(agentMessage),
+		"workspace_uuid", bs.workspaceUUID)
 
-	// Use the auxiliary conversation to analyze the message
-	suggestions, err := auxiliary.AnalyzeFollowUpQuestions(ctx, userPrompt, agentMessage)
+	// Check if we have an auxiliary manager
+	if bs.auxiliaryManager == nil {
+		bs.logger.Debug("follow-up analysis: no auxiliary manager available")
+		return
+	}
+
+	// Use the workspace-scoped auxiliary conversation to analyze the message
+	suggestions, err := bs.auxiliaryManager.AnalyzeFollowUpQuestions(ctx, bs.workspaceUUID, userPrompt, agentMessage)
 	if err != nil {
-		bs.logger.Debug("follow-up analysis failed", "error", err)
+		bs.logger.Debug("follow-up analysis failed",
+			"error", err,
+			"workspace_uuid", bs.workspaceUUID)
 		return
 	}
 
@@ -2986,6 +3462,14 @@ func formatACPError(err error) string {
 
 	errMsg := err.Error()
 
+	// SDK control request timeout (CLI subprocess died, ACP tried to reconnect and timed out)
+	// This is the 60s DEFAULT_CONTROL_REQUEST_TIMEOUT in claude-code-agent-sdk
+	if strings.Contains(errMsg, "Control request timed out") ||
+		strings.Contains(errMsg, "control request timed out") {
+		return "The AI agent's internal connection to the CLI timed out. " +
+			"This usually means the CLI subprocess crashed. The agent will attempt to restart automatically."
+	}
+
 	// Timeout errors from ACP server (tool execution took too long)
 	if strings.Contains(errMsg, "aborted due to timeout") {
 		return "A tool operation timed out. The AI agent's tool call took too long to complete. " +
@@ -2995,7 +3479,8 @@ func formatACPError(err error) string {
 	// Connection/transport errors
 	if strings.Contains(errMsg, "peer disconnected") ||
 		strings.Contains(errMsg, "connection reset") ||
-		strings.Contains(errMsg, "broken pipe") {
+		strings.Contains(errMsg, "broken pipe") ||
+		strings.Contains(errMsg, "stream ended unexpectedly") {
 		return "Lost connection to the AI agent. The agent process may have crashed or been restarted. " +
 			"Please try sending your message again."
 	}

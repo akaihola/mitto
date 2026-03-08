@@ -247,8 +247,18 @@ func (c *WebClient) SessionUpdate(ctx context.Context, params acp.SessionNotific
 		// The tool title contains the tool name (e.g., "mitto_get_current_session_mitto-debug").
 		// All mitto_* tools use self_id for automatic session detection.
 		if c.onMittoToolCall != nil && strings.Contains(u.ToolCall.Title, "mitto_") {
-			if selfID := extractMittoSelfID(u.ToolCall.RawInput); selfID != "" {
+			selfID := extractMittoSelfID(u.ToolCall.RawInput)
+			if selfID != "" {
 				c.onMittoToolCall(selfID)
+			} else if strings.Contains(u.ToolCall.Title, "get_current") {
+				// Fallback for agents that don't include RawInput in ACP tool_call events
+				// (e.g., Claude Code). Register with "init" — the documented default self_id
+				// value — so the MCP server can correlate the request with this session.
+				if c.logger != nil {
+					c.logger.Debug("mitto get_current tool call detected without RawInput, using fallback",
+						"tool_title", u.ToolCall.Title)
+				}
+				c.onMittoToolCall("init")
 			}
 		}
 
@@ -339,11 +349,12 @@ func (c *WebClient) autoApprovePermission(params acp.RequestPermissionRequest) (
 
 // WriteTextFile handles file write requests from the agent.
 func (c *WebClient) WriteTextFile(ctx context.Context, params acp.WriteTextFileRequest) (acp.WriteTextFileResponse, error) {
-	// Assign seq NOW at receive time.
-	seq := c.getNextSeq()
 	if err := mittoAcp.DefaultFileSystem.WriteTextFile(params.Path, params.Content); err != nil {
 		return acp.WriteTextFileResponse{}, err
 	}
+	// Assign seq AFTER success to avoid consuming a seq number on error,
+	// which would create a gap in the sequence (e.g., seq jumps from 992 to 994).
+	seq := c.getNextSeq()
 	if c.onFileWrite != nil {
 		c.onFileWrite(seq, params.Path, len(params.Content))
 	}
@@ -352,12 +363,13 @@ func (c *WebClient) WriteTextFile(ctx context.Context, params acp.WriteTextFileR
 
 // ReadTextFile handles file read requests from the agent.
 func (c *WebClient) ReadTextFile(ctx context.Context, params acp.ReadTextFileRequest) (acp.ReadTextFileResponse, error) {
-	// Assign seq NOW at receive time.
-	seq := c.getNextSeq()
 	content, err := mittoAcp.DefaultFileSystem.ReadTextFile(params.Path, params.Line, params.Limit)
 	if err != nil {
 		return acp.ReadTextFileResponse{}, err
 	}
+	// Assign seq AFTER success to avoid consuming a seq number on error,
+	// which would create a gap in the sequence (e.g., seq jumps from 992 to 994).
+	seq := c.getNextSeq()
 	if c.onFileRead != nil {
 		c.onFileRead(seq, params.Path, len(content))
 	}

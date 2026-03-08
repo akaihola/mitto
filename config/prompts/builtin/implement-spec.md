@@ -1,103 +1,84 @@
 ---
 name: "Implement spec"
 description: "Create a detailed implementation plan from a specification"
+group: "Development"
 backgroundColor: "#FFECB3"
 ---
 
-Read carefully the spec file we wrote.
+<investigate_before_answering>
+Read the spec file thoroughly. Explore the codebase for current architecture,
+patterns, and reusable utilities. Do not speculate — read relevant files first.
+</investigate_before_answering>
 
-## Phase 1: Understand the Specification
+<task>
+Read the spec, design the architecture, and create a detailed implementation plan
+broken into small iterative steps.
+</task>
 
-Before planning, ensure you fully understand:
+<scope>
+Only plan and implement what the spec requires. Keep solutions simple. No extra
+features, abstractions, or defensive coding beyond what's specified.
+</scope>
 
-1. **Core requirements**: What must be built?
-2. **Success criteria**: How will we know it's complete?
-3. **Constraints**: What limitations exist (tech stack, time, dependencies)?
-4. **Scope boundaries**: What is explicitly out of scope?
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-If anything is unclear, ask clarifying questions before proceeding.
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
 
-## Phase 2: Design the Architecture
+**Optional tools:**
+- `mitto_ui_ask_yes_no`
 
-Create a detailed blueprint for the implementation:
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
 
-### Components to Consider
+---
 
-1. **Data models**: Entities, relationships, schemas
-2. **APIs/Interfaces**: Endpoints, contracts, protocols
-3. **Business logic**: Core algorithms, rules, workflows
-4. **Error handling**: Failure modes, recovery strategies
-5. **Security**: Authentication, authorization, data protection
-6. **Testing strategy**: Unit, integration, E2E test approach
-7. **Observability**: Logging, metrics, monitoring
-8. **Versioning**: Backward compatibility considerations (if applicable)
+<instructions>
 
-### Dependency Analysis
+## Phase 1: Understand the Spec
 
-- Identify dependencies between components
-- Determine the optimal build order
-- Note external dependencies that need to be installed/configured
+1. Core requirements
+2. Success criteria
+3. Constraints (tech stack, dependencies)
+4. Scope boundaries
 
-**IMPORTANT**: Use the `think` tool (or any sequential/deep thinking tool available)
-to reason deeply about the design.
+Ask clarifying questions if anything is unclear.
 
-## Phase 3: Create the Implementation Plan
+## Phase 2: Design Architecture
 
-Break down the work into small, iterative chunks:
+Consider: data models, APIs/interfaces, business logic, error handling, security, testing strategy, observability, versioning.
 
-### Iteration Guidelines
+Identify dependencies between components and optimal build order.
 
-1. **First pass**: Identify major components and their order
-2. **Second pass**: Break each component into smaller steps
-3. **Third pass**: Review and ensure steps are:
-   - Small enough to implement safely with strong testing
-   - Large enough to make meaningful progress
-   - Properly ordered based on dependencies
+Use the `think` tool for deep reasoning about the design.
 
-### Step Format
+## Phase 3: Implementation Plan
 
-For each step, specify:
+Break into small iterative steps:
+1. Identify major components and order
+2. Break each into smaller steps
+3. Ensure steps are: small enough for safe testing, large enough for progress, properly ordered
+
+<output_format>
 
 | # | Description | Files/Components | Dependencies | Verification |
 |---|-------------|------------------|--------------|--------------|
 | 1 | ... | ... | None | ... |
 | 2 | ... | ... | Step 1 | ... |
 
-### Principles
+</output_format>
 
-- Each step should be independently testable
-- Prefer working software at every step over big-bang integration
-- Include test writing as part of each step, not as a separate phase
-- Consider rollback strategy for each step
+Each step should be independently testable. Include test writing in each step, not as a separate phase. Prefer working software at every step.
 
-**IMPORTANT**: Use the `todo` tool (or any task list tool available) to track
-the implementation plan and mark progress.
+Use the `todo` tool to track progress.
 
 ## Phase 4: Begin Implementation
 
-Present the plan and wait for approval before executing.
+Present plan, wait for approval.
 
-**Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to get approval:
-```
-Question: "Implementation plan is ready. Would you like me to proceed?"
-Yes label: "Approve and start"
-No label: "Modify plan"
-```
+**With Mitto UI**: `mitto_ui_ask_yes_no` → "Approve and start / Modify plan"
+**Without**: Ask in conversation.
 
-If the user selects "Modify plan", discuss the changes in conversation before proceeding.
+Once approved, per step: implement → write/update tests → verify → report → next.
 
-**Fallback (if Mitto UI tools are not available):**
+If issues arise that affect the plan, stop and discuss before continuing.
 
-Ask in conversation: "Does this plan look good? Should I proceed with implementation, or would you like to modify anything first?"
-
-Once approved, work through the steps systematically:
-
-1. Implement the step
-2. Write/update tests
-3. Verify the step works
-4. Report progress
-5. Move to the next step
-
-If issues arise during implementation that affect the plan, stop and discuss
-before continuing.
-
+</instructions>

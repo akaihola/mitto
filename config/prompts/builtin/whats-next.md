@@ -1,40 +1,47 @@
 ---
 name: "What's next?"
 description: "Analyze progress and suggest next steps"
+group: "Work flow"
 backgroundColor: "#BBDEFB"
 ---
 
-Analyze our progress and suggest next steps.
+<investigate_before_answering>
+Review current state: read relevant files, check git status and recent changes.
+</investigate_before_answering>
 
-### Review:
+<task>
+Analyze progress and suggest next steps.
+</task>
 
-1. **Completed**: What we've accomplished so far
-2. **Current state**: Where the code/project stands now
-3. **Remaining work**: What's left to do for the original goal
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-### Suggest next steps:
+**Optional tools:** `mitto_ui_ask_yes_no`
 
-Present a prioritized list:
+If missing, show instructions for Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
+
+---
+
+<instructions>
+
+### Review
+
+1. **Completed**: What we've accomplished
+2. **Current state**: Where things stand
+3. **Remaining**: What's left for the original goal
+
+### Suggest Next Steps
+
+<output_format>
 
 | Priority | Task | Reason | Effort |
 |----------|------|--------|--------|
 | 1 | ... | ... | Small/Medium/Large |
 
-### Consider:
-- Dependencies (what must come before what)
-- Risk (tackle risky items early)
-- Value (high-impact items first)
-- Blockers (anything preventing progress)
+</output_format>
 
-**Using Mitto UI tools (if available):** Use `mitto_ui_ask_yes_no` to offer proceeding:
-```
-Question: "Would you like me to proceed with the top priority task?"
-Yes label: "Yes, proceed"
-No label: "No, let me choose"
-```
+Consider: dependencies, risk (tackle risky items early), value (high-impact first), blockers.
 
-If the user selects "No", follow up in conversation to determine which task to tackle.
+**With Mitto UI**: `mitto_ui_ask_yes_no` → "Proceed with top priority task?"
+**Without**: Ask in conversation.
 
-**Fallback (if Mitto UI tools are not available):**
-
-Ask if I should proceed with the top priority item.
+</instructions>

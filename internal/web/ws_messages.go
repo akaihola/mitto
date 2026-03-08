@@ -310,8 +310,26 @@ const (
 
 	// WSMsgTypeACPStartFailed notifies that the ACP connection for a session failed to start.
 	// Sent when session creation or resumption fails due to ACP startup error.
-	// Data: { "session_id": string, "error": string }
+	// Data: { "session_id": string, "error": string, "command": string }
 	WSMsgTypeACPStartFailed = "acp_start_failed"
+
+	// WSMsgTypeSessionGone notifies that the session no longer exists on the server.
+	// This is a terminal signal: the client MUST stop reconnecting for this session.
+	// Sent when the server detects the session ID is not in memory and not in the store.
+	// Data: { "session_id": string, "reason": string }
+	WSMsgTypeSessionGone = "session_gone"
+
+	// WSMsgTypeACPErrorPermanent notifies that the ACP process encountered a permanent error
+	// that will not resolve by retrying. Includes actionable guidance for the user.
+	// Data: {
+	//   "session_id": string,
+	//   "error": string,
+	//   "error_class": string,     // "permanent"
+	//   "user_message": string,    // What went wrong
+	//   "user_guidance": string,   // How to fix it
+	//   "command": string          // The ACP command that failed
+	// }
+	WSMsgTypeACPErrorPermanent = "acp_error_permanent"
 
 	// WSMsgTypeAvailableCommandsUpdated notifies that the agent has sent available slash commands.
 	// Sent when the agent provides its list of supported slash commands.
@@ -340,6 +358,20 @@ const (
 	// Clients should refresh their prompts list when receiving this message.
 	// Data: { "changed_dirs": []string, "timestamp": string (ISO 8601) }
 	WSMsgTypePromptsChanged = "prompts_changed"
+
+	// WSMsgTypeMCPToolsUnavailable notifies that Mitto MCP tools are not available in the workspace.
+	// Sent when user focuses/switches to a conversation and MCP availability check fails.
+	// Data: {
+	//   "workspace_uuid": string,
+	//   "suggested_run": string (optional, single command to install),
+	//   "suggested_instructions": string (optional, max 500 chars, multi-step instructions)
+	// }
+	WSMsgTypeMCPToolsUnavailable = "mcp_tools_unavailable"
+
+	// WSMsgTypeRunMCPInstallCommand requests execution of the MCP installation command.
+	// Sent from frontend when user confirms running the suggested installation command.
+	// Data: { "command": string }
+	WSMsgTypeRunMCPInstallCommand = "run_mcp_install_command"
 )
 
 // =============================================================================

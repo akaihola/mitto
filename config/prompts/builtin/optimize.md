@@ -1,105 +1,114 @@
 ---
 name: "Optimize"
 description: "Identify and propose performance improvements"
+group: "Code Quality"
 backgroundColor: "#C8E6C9"
 ---
 
-Analyze the code for performance issues and propose a prioritized list of optimizations.
+<investigate_before_answering>
+Read relevant code paths thoroughly. Identify actual bottlenecks based on code
+structure — do not guess. Read multiple files in parallel.
+</investigate_before_answering>
 
-**Do not make changes immediately. Propose a plan first and wait for approval.**
+<task>
+Analyze for performance issues. Propose a prioritized plan and wait for approval.
+</task>
+
+<scope>
+Focus on measurable performance improvements. Do not refactor for style unless it
+directly contributes to the performance gain.
+</scope>
+
+## Prerequisites: Check for Mitto MCP Server (Optional)
+
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
+
+**Optional tools:**
+- `mitto_ui_options_buttons`
+- `mitto_conversation_get_current`
+- `mitto_conversation_new`
+- `mitto_children_tasks_wait`
+- `mitto_children_tasks_report`
+- `mitto_conversation_delete`
+
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
+
+---
+
+<instructions>
 
 ### 1. Analyze Performance
 
-**Profile first** - Identify actual bottlenecks, don't guess:
-- Review code for common performance anti-patterns
-- Look for hot paths and frequently executed code
-- Identify I/O operations, loops, and data processing
-
-**Categories to investigate:**
+Profile first — identify actual bottlenecks:
 
 | Category | What to Look For |
 |----------|------------------|
-| Algorithmic | Inefficient algorithms, O(n²) where O(n log n) is possible |
-| Memory | Excessive allocations, unnecessary copies, memory leaks |
+| Algorithmic | O(n²) where O(n log n) is possible |
+| Memory | Excessive allocations, unnecessary copies, leaks |
 | I/O | Unbuffered operations, synchronous blocking, N+1 queries |
 | Caching | Repeated expensive computations, missing memoization |
 | Concurrency | Sequential work that could be parallelized, lock contention |
 
-### 2. Propose Optimization Plan
+### 2. Propose Plan
 
-Present a prioritized table of proposed optimizations:
+<output_format>
 
-| Priority | Category | Location | Issue | Proposed Fix | Impact | Effort | Tradeoffs |
-|----------|----------|----------|-------|--------------|--------|--------|-----------|
-| 1 | Algorithmic | `path/to/file:fn()` | O(n²) loop | Use hash map lookup | High | Medium | More memory |
-| 2 | I/O | `path/to/file:fn()` | Unbuffered writes | Add buffering | Medium | Small | None |
-| 3 | Caching | `path/to/file:fn()` | Repeated computation | Memoize result | Medium | Small | Memory usage |
-| ... | ... | ... | ... | ... | ... | ... | ... |
+| Priority | Category | Location | Issue | Fix | Impact | Effort | Tradeoffs |
+|----------|----------|----------|-------|-----|--------|--------|-----------|
+| 1 | Algorithmic | `file:fn()` | O(n²) loop | Hash map | High | Medium | More memory |
 
-**Priority levels:**
-- **1 (High)**: Clear bottleneck with significant impact
-- **2 (Medium)**: Noticeable improvement expected
-- **3 (Low)**: Minor improvement, nice-to-have
+Priority: 1=clear bottleneck, 2=noticeable improvement, 3=minor.
 
-**Impact levels:**
-- **High**: Major performance improvement expected
-- **Medium**: Moderate improvement expected
-- **Low**: Minor improvement expected
+</output_format>
 
 ### 3. Wait for Approval
 
-**Using Mitto UI tools (if available):**
+**With Mitto UI**: `mitto_ui_options_buttons` → "Approve all / Approve selected / Investigate / Cancel"
+**Without**: Ask in conversation. Wait for explicit approval.
 
-If the `mitto_ui_options_buttons` tool is available, use it to present the approval options:
+### 4. Execute
 
-```
-Question: "How would you like to proceed with the optimization plan?"
-Options: ["Approve all", "Approve selected", "Investigate", "Cancel"]
-```
+Per item: implement, verify (tests), measure if possible, report.
 
-If the user selects "Approve selected" or "Investigate", follow up with a text conversation to get the specific item numbers or benchmark requests.
+#### Delegating Significant Optimizations to Child Conversations
 
-**Fallback (if Mitto UI tools are not available):**
+For optimizations spanning 3+ files, algorithm rewrites, concurrency additions, or multiple parallelizable items, delegate to Mitto child conversations.
 
-Ask the user in the conversation to choose one of these options:
+**Choosing the right ACP server:**
 
-- **Approve all** - proceed with all optimizations
-- **Approve selected** - specify which items to proceed with (by priority number)
-- **Investigate** - get more details or benchmarks on specific items
-- **Cancel** - abort without making changes
+1. `mitto_conversation_get_current(self_id: "init")` → get `available_acp_servers`
+2. Match server tags to task:
+   - Well-defined optimizations (buffering, memoization) → prefer `"coding"`/`"fast"` servers
+   - Complex optimizations (concurrency redesign, algorithmic tradeoffs) → prefer `"reasoning"`/`"planning"` servers
+   - No match → current server, then first available
+3. `mitto_conversation_new` with full context, constraints, and reporting directive
+4. `mitto_children_tasks_wait(timeout_seconds: 600)`
+5. Review results, verify correctness, check tradeoffs
+6. `mitto_conversation_delete` for completed children
 
-**Do not proceed until the user explicitly approves.**
+**Without Mitto tools**: execute directly.
 
-### 4. Execute Approved Optimizations
-
-For each approved item:
-1. Implement the optimization
-2. Verify correctness (run tests)
-3. Measure improvement if possible
-4. Report the result
-
-### 5. Report Summary
-
-After completing approved changes:
+### 5. Summary
 
 ```markdown
 ## Optimization Summary
-
 ### Changes Made
 | Item | Change | Expected Impact | Verified |
 |------|--------|-----------------|----------|
 | #1 | Replaced O(n²) with hash map | High | ✅ Tests pass |
-| #2 | Added I/O buffering | Medium | ✅ Tests pass |
-
 ### Skipped Items
-- Item #3: Skipped per user request
+- Item #N: Skipped per user request
 ```
 
-## Rules
+</instructions>
 
-- **Never optimize without proposing first**: Always present the plan and wait for approval
-- **Avoid premature optimization**: Focus on measurable improvements
-- **Profile before optimizing**: Identify actual bottlenecks, don't guess
-- **Document tradeoffs**: Note memory vs speed, complexity vs performance
-- **Verify correctness**: Run tests after each optimization
-- **Measure improvements**: Quantify the improvement when possible
+<rules>
+- Propose before implementing; wait for approval
+- Profile before optimizing — focus on actual bottlenecks, not guesses
+- Document tradeoffs (memory vs speed, complexity vs performance)
+- Verify correctness with tests after each optimization
+- Quantify improvements when possible
+- For significant optimizations, consider delegating to child conversations
+- Match ACP server to task: coding agents for clear optimizations, reasoning agents for complex redesigns
+- Max 4 parallel child conversations
+</rules>

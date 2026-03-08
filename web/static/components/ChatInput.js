@@ -12,8 +12,10 @@ import {
 } from "../utils/native.js";
 import { secureFetch, authFetch } from "../utils/csrf.js";
 import { apiUrl } from "../utils/api.js";
+import { getPromptSortMode } from "../utils/storage.js";
 import { SlashCommandPicker } from "./SlashCommandPicker.js";
 import { PeriodicFrequencyPanel } from "./PeriodicFrequencyPanel.js";
+import { SavePromptDialog } from "./SavePromptDialog.js";
 import { LockIcon, UnlockIcon } from "./Icons.js";
 
 /**
@@ -148,6 +150,7 @@ function sortPromptsByColor(prompts) {
  * @param {Object} props.activeUIPrompt - Active UI prompt from MCP tool { requestId, promptType, question, options, timeoutSeconds, receivedAt }
  * @param {Function} props.onUIPromptAnswer - Callback when user answers a UI prompt (requestId, optionId, label)
  * @param {string} props.workingDir - Workspace directory path (for smart file path insertion on native app drag & drop)
+ * @param {string} props.sendKeyMode - Key mode for sending messages: "enter" (default) or "ctrl-enter"
  */
 export function ChatInput({
   onSend,
@@ -172,9 +175,11 @@ export function ChatInput({
   actionButtons = [],
   availableCommands = [],
   periodicEnabled = false,
+  agentSupportsImages = false,
   activeUIPrompt = null,
   onUIPromptAnswer,
   workingDir = "",
+  sendKeyMode = "enter",
 }) {
   // Use the draft from parent state instead of local state
   const text = draft;
@@ -188,6 +193,11 @@ export function ChatInput({
   );
 
   const [showDropup, setShowDropup] = useState(false);
+
+  // State for prompt sort mode (alphabetical or color)
+  const [promptSortMode, setPromptSortMode] = useState(() =>
+    getPromptSortMode(),
+  );
 
   // Handler for toggling the prompts dropdown
   // Calls onPromptsOpen callback when opening to trigger prompt refresh
@@ -207,6 +217,9 @@ export function ChatInput({
   const [improveError, setImproveError] = useState(null);
   const textareaRef = useRef(null);
   const dropupRef = useRef(null);
+
+  // Save prompt dialog state
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
 
   // Track textarea focus for action toolbar visibility
   const [isTextareaFocused, setIsTextareaFocused] = useState(false);
@@ -245,6 +258,23 @@ export function ChatInput({
   // When locked, the prompt is saved to the periodic config and textarea is read-only
   const [isPeriodicLocked, setIsPeriodicLocked] = useState(false);
   const [isPeriodicSaving, setIsPeriodicSaving] = useState(false);
+
+  // Listen for prompt sort mode changes from settings
+  useEffect(() => {
+    const handleSortModeChange = (e) => {
+      setPromptSortMode(e.detail.mode);
+    };
+    window.addEventListener(
+      "mitto-prompt-sort-mode-changed",
+      handleSortModeChange,
+    );
+    return () => {
+      window.removeEventListener(
+        "mitto-prompt-sort-mode-changed",
+        handleSortModeChange,
+      );
+    };
+  }, []);
   const [periodicPrompt, setPeriodicPrompt] = useState(""); // The saved periodic prompt
   const [periodicFrequency, setPeriodicFrequency] = useState({
     value: 1,
@@ -738,16 +768,43 @@ export function ChatInput({
       }
     }
 
-    // Cmd/Ctrl+Enter to add to queue
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
-      e.preventDefault();
-      handleAddToQueueClick();
-      return;
-    }
-    // Enter (without modifiers) to send
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSubmit(e);
+    // Handle Enter key based on sendKeyMode
+    if (e.key === "Enter") {
+      const hasCtrlOrCmd = e.metaKey || e.ctrlKey;
+
+      if (sendKeyMode === "ctrl-enter") {
+        // Ctrl/Cmd+Enter mode:
+        // - Ctrl/Cmd+Shift+Enter: add to queue
+        // - Ctrl/Cmd+Enter (no shift): send message
+        // - Enter alone: new line (default textarea behavior)
+        if (hasCtrlOrCmd && e.shiftKey) {
+          e.preventDefault();
+          handleAddToQueueClick();
+          return;
+        }
+        if (hasCtrlOrCmd && !e.shiftKey) {
+          e.preventDefault();
+          handleSubmit(e);
+          return;
+        }
+        // Plain Enter - let it create a new line (don't prevent default)
+      } else {
+        // Default "enter" mode:
+        // - Cmd/Ctrl+Enter: add to queue
+        // - Enter (no modifiers): send message
+        // - Shift+Enter: new line (don't prevent default)
+        if (hasCtrlOrCmd && !e.shiftKey) {
+          e.preventDefault();
+          handleAddToQueueClick();
+          return;
+        }
+        if (!e.shiftKey && !hasCtrlOrCmd) {
+          e.preventDefault();
+          handleSubmit(e);
+          return;
+        }
+        // Shift+Enter - let it create a new line (don't prevent default)
+      }
     }
     // Close dropup on Escape
     if (e.key === "Escape") {
@@ -830,7 +887,13 @@ export function ChatInput({
       const response = await secureFetch(apiUrl("/api/aux/improve-prompt"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: text }),
+        body: JSON.stringify({
+          prompt: text,
+          workspace_uuid:
+            window.mittoCurrentWorkspaceUUID ||
+            sessionStorage.getItem("mittoCurrentWorkspaceUUID") ||
+            "",
+        }),
         signal: controller.signal,
       });
 
@@ -898,6 +961,11 @@ export function ChatInput({
   // Upload an image file to the session
   const uploadImage = async (file) => {
     if (!sessionId) return null;
+
+    if (!agentSupportsImages) {
+      setUploadError("⚠️ This agent may not support images — attaching anyway");
+      setTimeout(() => setUploadError(null), 5000);
+    }
 
     const validTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
     if (!validTypes.includes(file.type)) {
@@ -1323,6 +1391,10 @@ export function ChatInput({
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
 
     if (imageItems.length > 0) {
+      if (!agentSupportsImages) {
+        setUploadError("⚠️ This agent may not support images — attaching anyway");
+        setTimeout(() => setUploadError(null), 5000);
+      }
       e.preventDefault();
       for (const item of imageItems) {
         const file = item.getAsFile();
@@ -1824,6 +1896,8 @@ export function ChatInput({
       `}
 
       <!-- Collapsible Action Toolbar - positioned at bottom-right of conversation area -->
+      <!-- Note: toolbar uses flex-direction: row-reverse, so DOM order is reversed from visual order -->
+      <!-- Visual order (left to right): magic-wand / save / attach-file / attach-image / trash -->
       <div
         ref=${toolbarRef}
         class="action-toolbar ${isTextareaFocused &&
@@ -1832,6 +1906,37 @@ export function ChatInput({
           ? "visible"
           : ""}"
       >
+        <!-- Clear Button (trash icon) - rightmost in visual order -->
+        <button
+          type="button"
+          onClick=${() => {
+            setText("");
+            setPendingImages([]);
+            setPendingFiles([]);
+          }}
+          onMouseDown=${(e) => e.preventDefault()}
+          disabled=${isFullyDisabled ||
+          isReadOnly ||
+          isImproving ||
+          (!text.trim() && !hasPendingAttachments)}
+          class="action-toolbar-btn"
+          title="Clear message"
+        >
+          <svg
+            class="w-5 h-5"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+            />
+          </svg>
+        </button>
+
         <!-- Attach Image Button -->
         <button
           type="button"
@@ -1880,7 +1985,38 @@ export function ChatInput({
           </svg>
         </button>
 
-        <!-- Magic Wand / Improve Prompt Button -->
+        <!-- Save Prompt Button (floppy disk icon) - macOS native only, hidden on external access -->
+        ${isNativeApp() &&
+        window.mittoIsExternal !== true &&
+        html`
+          <button
+            type="button"
+            onClick=${() => setShowSaveDialog(true)}
+            onMouseDown=${(e) => e.preventDefault()}
+            disabled=${isFullyDisabled ||
+            !text.trim() ||
+            isReadOnly ||
+            isImproving}
+            class="action-toolbar-btn"
+            title="Save prompt as file"
+          >
+            <svg
+              class="w-5 h-5"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"
+              />
+            </svg>
+          </button>
+        `}
+
+        <!-- Magic Wand / Improve Prompt Button - leftmost in visual order -->
         <button
           type="button"
           onClick=${handleImprovePrompt}
@@ -2015,8 +2151,44 @@ export function ChatInput({
             >
               <div class="py-1">
                 ${(() => {
-                  // Sort all prompts by color (no separation by source)
-                  const sortedPrompts = sortPromptsByColor(predefinedPrompts);
+                  // Group prompts by their group attribute
+                  const groupedPrompts = {};
+                  const ungroupedPrompts = [];
+
+                  predefinedPrompts.forEach((prompt) => {
+                    if (prompt.group) {
+                      if (!groupedPrompts[prompt.group]) {
+                        groupedPrompts[prompt.group] = [];
+                      }
+                      groupedPrompts[prompt.group].push(prompt);
+                    } else {
+                      ungroupedPrompts.push(prompt);
+                    }
+                  });
+
+                  // Sort prompts within each group based on sort mode
+                  Object.keys(groupedPrompts).forEach((group) => {
+                    if (promptSortMode === "color") {
+                      groupedPrompts[group] = sortPromptsByColor(
+                        groupedPrompts[group],
+                      );
+                    } else {
+                      groupedPrompts[group].sort((a, b) =>
+                        a.name.localeCompare(b.name),
+                      );
+                    }
+                  });
+
+                  // Sort ungrouped prompts based on sort mode
+                  const sortedUngrouped =
+                    promptSortMode === "color"
+                      ? sortPromptsByColor(ungroupedPrompts)
+                      : [...ungroupedPrompts].sort((a, b) =>
+                          a.name.localeCompare(b.name),
+                        );
+
+                  // Sort group names alphabetically
+                  const sortedGroupNames = Object.keys(groupedPrompts).sort();
 
                   // Helper to get badge info based on source
                   const getBadgeInfo = (source) => {
@@ -2041,47 +2213,75 @@ export function ChatInput({
                     }
                   };
 
+                  // Render function for a single prompt
+                  const renderPrompt = (prompt, idx) => html`
+                    <button
+                      key=${"prompt-" + idx}
+                      type="button"
+                      onClick=${() => handlePredefinedPrompt(prompt)}
+                      title=${prompt.description || prompt.name}
+                      class="prompt-item w-full text-left px-4 py-2.5 text-sm text-gray-200 hover:brightness-110 transition-all flex items-center gap-2"
+                      style=${prompt.backgroundColor
+                        ? {
+                            backgroundColor: prompt.backgroundColor,
+                            color: getContrastColor(prompt.backgroundColor),
+                          }
+                        : {}}
+                    >
+                      <svg
+                        class="w-4 h-4 flex-shrink-0 opacity-60"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                          stroke-width="2"
+                          d="M13 10V3L4 14h7v7l9-11h-7z"
+                        />
+                      </svg>
+                      <span class="truncate flex-1">${prompt.name}</span>
+                      <span
+                        class="text-[10px] font-bold px-1.5 py-0.5 rounded ${getBadgeInfo(
+                          prompt.source,
+                        ).bgColor} text-white/90 flex-shrink-0"
+                        title=${getBadgeInfo(prompt.source).title}
+                      >
+                        ${getBadgeInfo(prompt.source).label}
+                      </span>
+                    </button>
+                  `;
+
                   return html`
-                    ${sortedPrompts.map(
-                      (prompt, idx) => html`
-                        <button
-                          key=${"prompt-" + idx}
-                          type="button"
-                          onClick=${() => handlePredefinedPrompt(prompt)}
-                          title=${prompt.description || prompt.name}
-                          class="prompt-item w-full text-left px-4 py-2.5 text-sm text-gray-200 hover:brightness-110 transition-all flex items-center gap-2"
-                          style=${prompt.backgroundColor
-                            ? {
-                                backgroundColor: prompt.backgroundColor,
-                                color: getContrastColor(prompt.backgroundColor),
-                              }
-                            : {}}
-                        >
-                          <svg
-                            class="w-4 h-4 flex-shrink-0 opacity-60"
-                            fill="none"
-                            stroke="currentColor"
-                            viewBox="0 0 24 24"
+                    ${sortedGroupNames.map(
+                      (groupName) => html`
+                        <div key=${"group-" + groupName}>
+                          <div
+                            class="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider bg-slate-700/30"
                           >
-                            <path
-                              stroke-linecap="round"
-                              stroke-linejoin="round"
-                              stroke-width="2"
-                              d="M13 10V3L4 14h7v7l9-11h-7z"
-                            />
-                          </svg>
-                          <span class="truncate flex-1">${prompt.name}</span>
-                          <span
-                            class="text-[10px] font-bold px-1.5 py-0.5 rounded ${getBadgeInfo(
-                              prompt.source,
-                            ).bgColor} text-white/90 flex-shrink-0"
-                            title=${getBadgeInfo(prompt.source).title}
-                          >
-                            ${getBadgeInfo(prompt.source).label}
-                          </span>
-                        </button>
+                            ${groupName}
+                          </div>
+                          ${groupedPrompts[groupName].map((prompt, idx) =>
+                            renderPrompt(prompt, idx),
+                          )}
+                        </div>
                       `,
                     )}
+                    ${sortedUngrouped.length > 0
+                      ? html`
+                          <div key="group-other">
+                            <div
+                              class="px-4 py-2 text-xs font-semibold text-gray-400 uppercase tracking-wider bg-slate-700/30"
+                            >
+                              Other
+                            </div>
+                            ${sortedUngrouped.map((prompt, idx) =>
+                              renderPrompt(prompt, idx),
+                            )}
+                          </div>
+                        `
+                      : ""}
                   `;
                 })()}
               </div>
@@ -2499,6 +2699,14 @@ export function ChatInput({
           </div>
         </div>
       `}
+
+      <!-- Save Prompt Dialog -->
+      <${SavePromptDialog}
+        isOpen=${showSaveDialog}
+        onClose=${() => setShowSaveDialog(false)}
+        promptText=${text}
+        workingDir=${workingDir}
+      />
     </form>
   `;
 }

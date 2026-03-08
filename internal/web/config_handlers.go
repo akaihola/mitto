@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/inercia/mitto/internal/auxiliary"
 	configPkg "github.com/inercia/mitto/internal/config"
 	"github.com/inercia/mitto/internal/runner"
 	"github.com/inercia/mitto/internal/secrets"
@@ -26,6 +25,7 @@ type ConfigSaveRequest struct {
 		Prompts     []configPkg.WebPrompt      `json:"prompts,omitempty"`
 		Source      configPkg.ConfigItemSource `json:"source,omitempty"`       // Source of the server (rcfile, settings)
 		AutoApprove bool                       `json:"auto_approve,omitempty"` // Auto-approve permission requests
+		Tags        []string                   `json:"tags,omitempty"`         // Optional categorization tags
 	} `json:"acp_servers"`
 	// Prompts is the top-level list of global prompts
 	Prompts []configPkg.WebPrompt `json:"prompts,omitempty"`
@@ -38,7 +38,8 @@ type ConfigSaveRequest struct {
 				Password string `json:"password"`
 			} `json:"simple,omitempty"`
 		} `json:"auth,omitempty"`
-		Hooks *configPkg.WebHooks `json:"hooks,omitempty"`
+		Hooks     *configPkg.WebHooks        `json:"hooks,omitempty"`
+		AccessLog *configPkg.AccessLogConfig `json:"access_log,omitempty"`
 	} `json:"web"`
 	UI            *configPkg.UIConfig            `json:"ui,omitempty"`
 	Conversations *configPkg.ConversationsConfig `json:"conversations,omitempty"`
@@ -128,6 +129,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 				"source":       string(srv.Source), // Include source for frontend read-only indication
 				"auto_approve": srv.AutoApprove,    // Include auto-approve setting for permissions
 				"env":          srv.Env,            // Include environment variables
+				"tags":         srv.Tags,           // Include categorization tags
 			}
 
 			// Include type if specified (for prompt matching)
@@ -159,7 +161,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		response["has_rcfile_servers"] = s.config.HasRCFileServers
 	}
 
-	writeJSONOK(w, response)
+	writeJSONWithETag(w, r, response)
 }
 
 // handleSaveConfig handles POST /api/config.
@@ -289,7 +291,8 @@ func (s *Server) handleImprovePrompt(w http.ResponseWriter, r *http.Request) {
 
 	// Parse request body
 	var req struct {
-		Prompt string `json:"prompt"`
+		Prompt        string `json:"prompt"`
+		WorkspaceUUID string `json:"workspace_uuid"` // Required for workspace-scoped auxiliary
 	}
 	if !parseJSONBody(w, r, &req) {
 		return
@@ -300,8 +303,13 @@ func (s *Server) handleImprovePrompt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.WorkspaceUUID == "" {
+		http.Error(w, "Workspace UUID is required", http.StatusBadRequest)
+		return
+	}
+
 	// Check if auxiliary manager is initialized
-	if auxiliary.GetManager() == nil {
+	if s.auxiliaryManager == nil {
 		s.logger.Error("Auxiliary manager not initialized")
 		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 		return
@@ -311,10 +319,12 @@ func (s *Server) handleImprovePrompt(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	// Call the auxiliary package to improve the prompt
-	improved, err := auxiliary.ImprovePrompt(ctx, req.Prompt)
+	// Call the workspace-scoped auxiliary manager to improve the prompt
+	improved, err := s.auxiliaryManager.ImprovePrompt(ctx, req.WorkspaceUUID, req.Prompt)
 	if err != nil {
-		s.logger.Error("Failed to improve prompt", "error", err)
+		s.logger.Error("Failed to improve prompt",
+			"error", err,
+			"workspace_uuid", req.WorkspaceUUID)
 		http.Error(w, "Failed to improve prompt", http.StatusInternalServerError)
 		return
 	}
@@ -360,6 +370,7 @@ func (s *Server) buildNewSettings(req *ConfigSaveRequest) (*configPkg.Settings, 
 			Env:         srv.Env,                  // Environment variables
 			Source:      configPkg.SourceSettings, // Mark as settings-sourced
 			AutoApprove: srv.AutoApprove,          // Auto-approve permission requests
+			Tags:        srv.Tags,                 // Categorization tags
 			// Per-server prompts are no longer saved to settings.json
 			// They are managed via prompt files with acps: field
 		}
@@ -422,6 +433,11 @@ func (s *Server) buildNewSettings(req *ConfigSaveRequest) (*configPkg.Settings, 
 	} else {
 		// Clear hooks if not provided
 		newWebConfig.Hooks = configPkg.WebHooks{}
+	}
+
+	// Update access log settings
+	if req.Web.AccessLog != nil {
+		newWebConfig.AccessLog = req.Web.AccessLog
 	}
 
 	// Build UI config - preserve existing settings, update from request if provided
@@ -711,14 +727,27 @@ func (s *Server) handleSupportedRunners(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleAdvancedFlags handles GET /api/advanced-flags.
-// Returns the list of available advanced setting flags that can be configured per-session.
+// Returns the list of available advanced setting flags that can be configured per-session,
+// along with the configured default values from the config file.
 func (s *Server) handleAdvancedFlags(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
 
-	writeJSONOK(w, session.AvailableFlags)
+	// Get configured default flags from config
+	configuredDefaults := make(map[string]bool)
+	if s.config.MittoConfig != nil && s.config.MittoConfig.Conversations != nil {
+		configuredDefaults = s.config.MittoConfig.Conversations.DefaultFlags
+	}
+
+	// Build response with both available flags and configured defaults
+	response := map[string]interface{}{
+		"flags":               session.AvailableFlags,
+		"configured_defaults": configuredDefaults,
+	}
+
+	writeJSONOK(w, response)
 }
 
 // checkRunnerSupport checks if a runner type is supported on the current platform.

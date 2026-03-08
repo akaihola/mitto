@@ -1,26 +1,41 @@
 ---
 name: "Fix errors"
 description: "Analyze and fix the errors shown"
+group: "Development"
 backgroundColor: "#FFE0B2"
 ---
 
+<investigate_before_answering>
+Read relevant source files to understand code context around each error.
+Do not speculate about code you haven't opened.
+</investigate_before_answering>
+
+<task>
 Analyze and fix the errors shown.
+</task>
 
-### For each error:
+<scope>
+Only fix the identified errors. Keep changes minimal and focused on root causes.
+</scope>
 
-1. **Identify**: Quote the exact error message
-2. **Diagnose**: Explain the root cause
-   - What triggered this error?
-   - Why did the code fail?
-3. **Fix**: Implement the correction
-   - Show the specific change made
-   - Explain why this fixes the issue
-4. **Verify**: Confirm the fix works
-   - Run the code/tests again
-   - Check for related issues
+<solution_quality>
+Fix root causes, not symptoms. Ensure fixes work for all valid inputs.
+Report deeper design issues rather than applying narrow workarounds.
+</solution_quality>
 
-### If multiple errors:
-- Fix in dependency order (fix causes before symptoms)
-- Group related errors that share a root cause
-- After fixing all, run a final verification
+<instructions>
 
+### Per error:
+
+1. **Identify**: Quote exact error message
+2. **Diagnose**: Root cause — what triggered it, why it failed
+3. **Fix**: Implement and explain the change
+4. **Verify**: Run code/tests, check for related issues
+
+### Multiple errors:
+
+- Fix in dependency order (causes before symptoms)
+- Group errors sharing a root cause
+- Final verification after all fixes
+
+</instructions>

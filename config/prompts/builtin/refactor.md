@@ -1,100 +1,114 @@
 ---
 name: "Refactor"
 description: "Propose refactoring improvements for better code quality"
+group: "Code Quality"
 backgroundColor: "#C8E6C9"
 ---
 
-Analyze the code and propose a prioritized list of refactoring improvements.
+<investigate_before_answering>
+Read the code thoroughly: current structure, callers, dependents. Read multiple
+files in parallel. Do not speculate about code you haven't opened.
+</investigate_before_answering>
 
-**Do not make changes immediately. Propose a plan first and wait for approval.**
+<task>
+Analyze and propose a prioritized list of refactoring improvements.
+Propose a plan and wait for approval.
+</task>
 
-### 1. Analyze the Code
+<scope>
+Preserve external behavior. One type of change at a time. No new features.
+</scope>
 
-Investigate the following areas:
+## Prerequisites: Check for Mitto MCP Server (Optional)
+
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
+
+**Optional tools:**
+- `mitto_ui_options_buttons`
+- `mitto_conversation_get_current`
+- `mitto_conversation_new`
+- `mitto_children_tasks_wait`
+- `mitto_children_tasks_report`
+- `mitto_conversation_delete`
+
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
+
+---
+
+<instructions>
+
+### 1. Analyze
 
 | Area | What to Look For |
 |------|------------------|
-| Naming | Unclear or misleading names for variables, functions, types |
-| Structure | Disorganized code, related functionality scattered across files |
-| Single Responsibility | Functions/classes doing too many things |
+| Naming | Unclear or misleading names |
+| Structure | Related functionality scattered across files |
+| SRP | Functions/classes doing too many things |
 | DRY | Repeated patterns that could be extracted |
-| Error Handling | Inconsistent or uninformative error messages |
-| Idioms | Code not following language-specific best practices |
+| Error Handling | Inconsistent or uninformative errors |
+| Idioms | Code not following language best practices |
 
-### 2. Propose Refactoring Plan
+### 2. Propose Plan
 
-Present a prioritized table of proposed refactorings:
+<output_format>
 
-| Priority | Category | Location | Issue | Proposed Change | Benefit | Effort |
-|----------|----------|----------|-------|-----------------|---------|--------|
-| 1 | Structure | `path/to/file` | Related functions scattered | Group into module | Better organization | Medium |
-| 2 | DRY | `path/to/files` | Duplicated validation logic | Extract to helper | Less duplication | Small |
-| 3 | Naming | `path/to/file:fn()` | Unclear function name | Rename to `descriptiveName()` | Clarity | Small |
-| ... | ... | ... | ... | ... | ... | ... |
+| Priority | Category | Location | Issue | Change | Benefit | Effort |
+|----------|----------|----------|-------|--------|---------|--------|
+| 1 | Structure | `path/file` | Related fns scattered | Group into module | Better organization | Medium |
 
-**Priority levels:**
-- **1 (High)**: Significantly improves maintainability or readability
-- **2 (Medium)**: Noticeable improvement to code quality
-- **3 (Low)**: Minor improvement, nice-to-have
+Priority: 1=significant maintainability gain, 2=noticeable quality improvement, 3=minor.
+Effort: Small (low risk), Medium (some risk), Large (higher risk).
 
-**Effort levels:**
-- **Small**: Quick change, low risk
-- **Medium**: Moderate change, some risk
-- **Large**: Significant change, higher risk
+</output_format>
 
 ### 3. Wait for Approval
 
-**Using Mitto UI tools (if available):**
+**With Mitto UI**: `mitto_ui_options_buttons` → "Approve all / Approve selected / Investigate / Cancel"
+**Without**: Ask in conversation. Wait for explicit approval.
 
-If the `mitto_ui_options_buttons` tool is available, use it to present the approval options:
+### 4. Execute
 
-```
-Question: "How would you like to proceed with the refactoring plan?"
-Options: ["Approve all", "Approve selected", "Investigate", "Cancel"]
-```
+Per item: make one type of change, run tests, preserve external behavior, report.
 
-If the user selects "Approve selected" or "Investigate", follow up with a text conversation to get the specific item numbers.
+#### Delegating Significant Refactorings to Child Conversations
 
-**Fallback (if Mitto UI tools are not available):**
+For refactorings spanning 3+ files, module extraction, or multiple parallelizable items, delegate to Mitto child conversations.
 
-Ask the user in the conversation to choose one of these options:
+**Choosing the right ACP server:**
 
-- **Approve all** - proceed with all refactorings
-- **Approve selected** - specify which items to proceed with (by priority number)
-- **Investigate** - get more details on specific items before deciding
-- **Cancel** - abort without making changes
+1. `mitto_conversation_get_current(self_id: "init")` → get `available_acp_servers`
+2. Match server tags to task:
+   - Mechanical restructuring (renames, moves, obvious extractions) → prefer `"coding"`/`"fast"` servers
+   - Complex decompositions, architectural decisions → prefer `"reasoning"`/`"planning"` servers
+   - No match → current server, then first available
+3. `mitto_conversation_new` with full context, constraints (preserve behavior, no new features), and reporting directive
+4. `mitto_children_tasks_wait(timeout_seconds: 600)`
+5. Review results, verify behavior preserved, run tests
+6. `mitto_conversation_delete` for completed children
 
-**Do not proceed until the user explicitly approves.**
+**Without Mitto tools**: execute directly.
 
-### 4. Execute Approved Refactorings
-
-For each approved item:
-1. Make one type of change at a time
-2. Run tests after each change to catch regressions
-3. Preserve external behavior (this is refactoring, not rewriting)
-4. Report the result
-
-### 5. Report Summary
-
-After completing approved changes:
+### 5. Summary
 
 ```markdown
 ## Refactoring Summary
-
 ### Changes Made
 | Item | Change | Benefit | Verified |
 |------|--------|---------|----------|
-| #1 | Grouped related functions into module | Better organization | ✅ Tests pass |
-| #2 | Extracted validation helper | Less duplication | ✅ Tests pass |
-
+| #1 | Grouped related functions | Better organization | ✅ Tests pass |
 ### Skipped Items
-- Item #3: Skipped per user request
+- Item #N: Skipped per user request
 ```
 
-## Rules
+</instructions>
 
-- **Never refactor without proposing first**: Always present the plan and wait for approval
-- **Preserve external behavior**: This is refactoring, not rewriting
-- **Make one type of change at a time**: Easier to review and revert if needed
-- **Run tests after each change**: Catch regressions early
-- **Document the benefit**: Explain why each change improves the code
+<rules>
+- Propose before implementing; wait for approval
+- Preserve external behavior
+- One type of change at a time
+- Run tests after each change
+- Explain the benefit of each change
+- For significant refactorings, consider delegating to child conversations
+- Match ACP server to task: coding agents for mechanical changes, reasoning agents for complex decompositions
+- Max 4 parallel child conversations
+</rules>

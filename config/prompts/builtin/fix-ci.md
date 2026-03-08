@@ -1,116 +1,98 @@
 ---
 name: "Fix CI"
 description: "Diagnose and fix CI pipeline failures"
+group: "CI"
 backgroundColor: "#B2DFDB"
 ---
 
+<investigate_before_answering>
+Check CI status and read failure logs before making changes. Do not speculate —
+read the logs and relevant source files.
+</investigate_before_answering>
+
+<task>
 Diagnose and fix CI pipeline failures for the current branch.
+</task>
+
+<scope>
+Only fix CI-failing issues. Keep changes minimal.
+</scope>
+
+<solution_quality>
+Fix root causes, not symptoms. If a test fails, fix the code or test based on
+which is actually wrong — no hard-coded workarounds. Report flawed tests/requirements
+rather than working around them.
+</solution_quality>
+
+<instructions>
 
 ### 1. Detect CI System
 
-Check for CI configuration files to identify the CI system in use:
-
 | CI System | Detection Files |
 |-----------|-----------------|
-| GitHub Actions | `.github/workflows/*.yml` or `.github/workflows/*.yaml` |
+| GitHub Actions | `.github/workflows/*.yml` |
 | GitLab CI | `.gitlab-ci.yml` |
 | Jenkins | `Jenkinsfile` |
 | CircleCI | `.circleci/config.yml` |
 | Travis CI | `.travis.yml` |
 | Azure Pipelines | `azure-pipelines.yml` |
 
-If no CI configuration is found, inform the user and stop.
+If none found, inform user and stop.
 
-### 2. Check CI Tool Availability
+### 2. Check CLI Tool
 
-Verify the appropriate CLI tool is installed and authenticated:
-
-| CI System | CLI Tool | Auth Check Command |
-|-----------|----------|-------------------|
+| CI System | CLI | Auth Check |
+|-----------|-----|------------|
 | GitHub Actions | `gh` | `gh auth status` |
 | GitLab CI | `glab` | `glab auth status` |
 
-If the CLI tool is not installed or not authenticated:
-- Report the issue clearly
-- Provide installation/authentication instructions
-- Stop and wait for user to resolve
+If not installed/authenticated: report, provide instructions, stop.
 
-### 3. Get Current Branch and CI Status
+### 3. Get Status
 
 ```bash
-# Get current branch
 git branch --show-current
-
-# GitHub Actions: Check workflow runs
-gh run list --branch <current-branch> --limit 5
-
-# GitLab CI: Check pipeline status
-glab ci status
+gh run list --branch <branch> --limit 5    # GitHub
+glab ci status                              # GitLab
 ```
 
-If CI is passing, report success and stop.
+If passing, report success and stop.
 
-### 4. Diagnose Failures
+### 4. Diagnose
 
-If CI is failing, retrieve and analyze the failure logs:
-
-**GitHub Actions:**
 ```bash
-# Get the failed run ID from the list
-gh run view <run-id> --log-failed
+gh run view <run-id> --log-failed    # GitHub
+glab ci view --log                    # GitLab
 ```
 
-**GitLab CI:**
-```bash
-glab ci view --log
-```
+Per failure:
+1. Quote exact error from logs
+2. Diagnose root cause: test failure, build error, lint/format, dependency, config/environment
 
-For each failure:
-1. **Identify**: Quote the exact error message from the logs
-2. **Diagnose**: Explain the root cause
-   - Is it a test failure?
-   - Is it a build/compilation error?
-   - Is it a linting/formatting issue?
-   - Is it a dependency issue?
-   - Is it a configuration/environment issue?
+### 5. Fix
 
-### 5. Fix Issues
+Per issue: implement fix, explain the change, verify locally (tests, build, lint).
 
-For each identified issue:
+Fix in dependency order — causes before symptoms.
 
-1. **Implement the fix** in the codebase
-2. **Explain the change** and why it resolves the issue
-3. **Verify locally** if possible (run tests, build, lint)
-
-Fix issues in dependency order (fix causes before symptoms).
-
-### 6. Report and Guide User
-
-Show a summary of the fixes implemented:
+### 6. Report
 
 ```console
-✅ Fixes pushed successfully!
-
-CI has been triggered. The pipeline typically takes X minutes to complete.
-
-To check the status:
-- GitHub: gh run watch
-- GitLab: glab ci status
-
-Check back in a few minutes to verify the fixes resolved the issues.
-If CI still fails, run this prompt again to diagnose any remaining issues.
+✅ Fixes applied. Push and monitor CI.
+To check: gh run watch / glab ci status
+If CI still fails, run this prompt again.
 ```
 
 ### 7. Commit and Push
 
-After all fixes are implemented, suggest the user to commit
-and push the changes.
+Suggest user commit and push the changes.
 
-## Rules
+</instructions>
 
-- Always check CI status before attempting fixes
-- Never modify CI configuration files without explicit user approval
-- If fixes require dependency changes, ask user for approval first
-- If the failure is in a flaky test, report it rather than retrying blindly
-- If the failure is infrastructure-related (CI service issues), inform the user
-- Group related fixes in a single commit when possible
+<rules>
+- Check CI status before attempting fixes
+- Get user approval before modifying CI config or dependencies
+- Report flaky tests as flaky rather than retrying blindly
+- Note infrastructure-related failures explicitly
+- Group related fixes in a single commit
+</rules>

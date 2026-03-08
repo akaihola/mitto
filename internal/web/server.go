@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/inercia/mitto/internal/appdir"
+	"github.com/inercia/mitto/internal/auxiliary"
 	configPkg "github.com/inercia/mitto/internal/config"
 	"github.com/inercia/mitto/internal/defense"
 	"github.com/inercia/mitto/internal/logging"
@@ -165,6 +166,16 @@ type Server struct {
 
 	// Prompts watcher for monitoring prompt file changes
 	promptsWatcher *configPkg.PromptsWatcher
+
+	// ACP process manager for workspace-scoped shared processes
+	acpProcessManager *ACPProcessManager
+
+	// Auxiliary manager for workspace-scoped auxiliary tasks (title generation, etc.)
+	auxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
+
+	// Negative session cache for circuit-breaking "Session not found" error storms.
+	// Caches session IDs known to not exist, preventing repeated filesystem lookups.
+	negativeSessionCache *NegativeSessionCache
 }
 
 // APIPrefix returns the URL prefix for all API and WebSocket endpoints.
@@ -240,6 +251,10 @@ func NewServer(config Config) (*Server, error) {
 		sessionMgr.SetAPIPrefix(apiPrefix)
 	}
 	sessionMgr.SetStore(store)
+
+	// Create shared ACP process manager for workspace-level process sharing
+	acpProcessMgr := NewACPProcessManager(context.Background(), logger)
+	sessionMgr.SetACPProcessManager(acpProcessMgr)
 
 	// Set global conversations config for message processing
 	if config.MittoConfig != nil {
@@ -343,6 +358,13 @@ func NewServer(config Config) (*Server, error) {
 
 	eventsManager := NewGlobalEventsManager()
 
+	// Initialize auxiliary manager for workspace-scoped auxiliary tasks
+	// This provides high-level operations (title generation, follow-up analysis, etc.)
+	// Note: reuses acpProcessMgr (the same instance used by sessionMgr) so that
+	// auxiliary sessions can find the workspace processes registered by user sessions.
+	auxiliaryManager := auxiliary.NewWorkspaceAuxiliaryManager(acpProcessMgr, logger)
+	sessionMgr.SetAuxiliaryManager(auxiliaryManager)
+
 	// Initialize scanner defense
 	// Enabled by default when external access is configured (ExternalPort >= 0)
 	var scannerDefense *defense.ScannerDefense
@@ -367,20 +389,23 @@ func NewServer(config Config) (*Server, error) {
 	}
 
 	s := &Server{
-		config:            config,
-		logger:            logger,
-		apiPrefix:         apiPrefix,
-		eventsManager:     eventsManager,
-		sessionManager:    sessionMgr,
-		store:             store,
-		authManager:       authMgr,
-		csrfManager:       csrfMgr,
-		rateLimiter:       rateLimiter,
-		connectionTracker: connectionTracker,
-		wsSecurityConfig:  wsSecurityConfig,
-		proxyChecker:      proxyChecker,
-		accessLogger:      accessLogger,
-		defense:           scannerDefense,
+		config:               config,
+		logger:               logger,
+		apiPrefix:            apiPrefix,
+		eventsManager:        eventsManager,
+		sessionManager:       sessionMgr,
+		store:                store,
+		authManager:          authMgr,
+		csrfManager:          csrfMgr,
+		rateLimiter:          rateLimiter,
+		connectionTracker:    connectionTracker,
+		wsSecurityConfig:     wsSecurityConfig,
+		proxyChecker:         proxyChecker,
+		accessLogger:         accessLogger,
+		defense:              scannerDefense,
+		acpProcessManager:    acpProcessMgr,
+		auxiliaryManager:     auxiliaryManager,
+		negativeSessionCache: NewNegativeSessionCache(),
 	}
 
 	// Set events manager in session manager for broadcasting
@@ -421,7 +446,7 @@ func NewServer(config Config) (*Server, error) {
 	}
 
 	// Initialize queue title worker
-	s.queueTitleWorker = NewQueueTitleWorker(store, logger)
+	s.queueTitleWorker = NewQueueTitleWorker(store, sessionMgr, auxiliaryManager, logger)
 	s.queueTitleWorker.OnTitleGenerated = func(sessionID, messageID, title string) {
 		// Broadcast title update to all connected clients
 		s.eventsManager.Broadcast(WSMsgTypeQueueMessageTitled, map[string]string{
@@ -434,6 +459,18 @@ func NewServer(config Config) (*Server, error) {
 	// Initialize periodic runner for scheduled prompt delivery
 	s.periodicRunner = NewPeriodicRunner(store, sessionMgr, logger)
 	s.periodicRunner.SetOnPeriodicStarted(s.BroadcastPeriodicStarted)
+
+	// Configure auto-archive inactive sessions if enabled
+	if config.MittoConfig != nil && config.MittoConfig.Session != nil {
+		autoArchivePeriod := config.MittoConfig.Session.GetAutoArchiveInactiveAfter()
+		if autoArchiveDuration, err := parseAutoArchivePeriod(autoArchivePeriod); err != nil {
+			logger.Warn("Invalid auto-archive period, feature disabled", "period", autoArchivePeriod, "error", err)
+		} else if autoArchiveDuration > 0 {
+			s.periodicRunner.SetAutoArchiveAfter(autoArchiveDuration)
+			logger.Info("Auto-archive inactive sessions enabled", "period", autoArchivePeriod, "duration", autoArchiveDuration)
+		}
+	}
+
 	s.periodicRunner.Start()
 
 	// Initialize prompts watcher for monitoring prompt file changes
@@ -476,6 +513,10 @@ func NewServer(config Config) (*Server, error) {
 	mux.HandleFunc(apiPrefix+"/api/badge-click", s.handleBadgeClick)
 	mux.HandleFunc(apiPrefix+"/api/ui-preferences", s.handleUIPreferences)
 
+	// File save endpoints - restricted to localhost only (used by native macOS app)
+	mux.HandleFunc(apiPrefix+"/api/save-file-to-path", s.handleSaveFileToPath)
+	mux.HandleFunc(apiPrefix+"/api/check-file-exists", s.handleCheckFileExists)
+
 	// M3: Health check endpoint for load balancer integration and monitoring
 	// This endpoint is intentionally NOT behind auth to allow health checks
 	mux.HandleFunc(apiPrefix+"/api/health", s.handleHealthCheck)
@@ -486,6 +527,12 @@ func NewServer(config Config) (*Server, error) {
 
 	// WebSocket endpoints - also use the API prefix
 	mux.HandleFunc(apiPrefix+"/api/events", s.handleGlobalEventsWS) // Global events (session lifecycle)
+
+	// Robots.txt: discourage bot crawlers from indexing
+	mux.HandleFunc("/robots.txt", handleRobotsTxt)
+	if apiPrefix != "" {
+		mux.HandleFunc(apiPrefix+"/robots.txt", handleRobotsTxt)
+	}
 
 	// Static files: use filesystem directory if specified, otherwise use embedded assets
 	var staticFS fs.FS
@@ -730,6 +777,17 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSONOK(w, response)
 }
 
+// handleRobotsTxt serves a robots.txt that disallows all crawling.
+// This discourages well-behaved bots (e.g., GPTBot, OAI-SearchBot) from probing the server.
+func handleRobotsTxt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprint(w, "User-agent: *\nDisallow: /\n")
+}
+
 // loggingMiddleware logs HTTP requests.
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -909,18 +967,45 @@ func (s *Server) BroadcastACPStarted(sessionID string) {
 }
 
 // BroadcastACPStartFailed notifies all connected clients that an ACP connection failed to start.
-func (s *Server) BroadcastACPStartFailed(sessionID, errorMsg string) {
+// If err is an *ACPClassifiedError with a permanent classification, a more detailed
+// "acp_error_permanent" message is broadcast with actionable user guidance.
+func (s *Server) BroadcastACPStartFailed(sessionID string, err error, command string) {
 	if s.eventsManager == nil {
 		return
 	}
 
-	s.eventsManager.Broadcast(WSMsgTypeACPStartFailed, map[string]string{
+	data := map[string]interface{}{
 		"session_id": sessionID,
-		"error":      errorMsg,
-	})
+		"error":      err.Error(),
+		"command":    command,
+	}
+
+	// Check if this is a classified permanent error — broadcast with extra context.
+	if classified, ok := err.(*ACPClassifiedError); ok && !classified.IsRetryable() {
+		data["error_class"] = classified.Class.String()
+		data["user_message"] = classified.UserMessage
+		data["user_guidance"] = classified.UserGuidance
+
+		s.eventsManager.Broadcast(WSMsgTypeACPErrorPermanent, data)
+
+		if s.logger != nil {
+			s.logger.Warn("Broadcast ACP permanent error",
+				"session_id", sessionID,
+				"user_message", classified.UserMessage,
+				"command", command,
+				"clients", s.eventsManager.ClientCount())
+		}
+		return
+	}
+
+	// Default: broadcast as regular start-failed.
+	s.eventsManager.Broadcast(WSMsgTypeACPStartFailed, data)
 
 	if s.logger != nil {
-		s.logger.Warn("Broadcast ACP start failed", "session_id", sessionID, "error", errorMsg,
+		s.logger.Warn("Broadcast ACP start failed",
+			"session_id", sessionID,
+			"error", err.Error(),
+			"command", command,
 			"clients", s.eventsManager.ClientCount())
 	}
 }
@@ -992,6 +1077,21 @@ func (a *sessionManagerAdapter) ResumeSession(sessionID, sessionName, workingDir
 	return bs, nil
 }
 
+// GetWorkspacesForFolder returns all workspace configurations for the given folder.
+func (a *sessionManagerAdapter) GetWorkspacesForFolder(folder string) []configPkg.WorkspaceSettings {
+	return a.sm.GetWorkspacesForFolder(folder)
+}
+
+// BroadcastSessionCreated broadcasts a session_created event to all connected clients.
+func (a *sessionManagerAdapter) BroadcastSessionCreated(sessionID, name, acpServer, workingDir, parentSessionID string) {
+	a.sm.BroadcastSessionCreated(sessionID, name, acpServer, workingDir, parentSessionID)
+}
+
+// BroadcastSessionArchived broadcasts a session_archived event to all connected clients.
+func (a *sessionManagerAdapter) BroadcastSessionArchived(sessionID string, archived bool) {
+	a.sm.BroadcastSessionArchived(sessionID, archived)
+}
+
 // =============================================================================
 // PromptsSubscriber implementation
 // =============================================================================
@@ -1039,6 +1139,26 @@ func (s *Server) getPromptsWatchDirs() []string {
 	}
 
 	return dirs
+}
+
+// parseAutoArchivePeriod converts an auto-archive period string to a duration.
+// Returns 0 for empty string (disabled).
+// Supported values: "1d" (1 day), "1w" (1 week), "1m" (1 month), "3m" (3 months).
+func parseAutoArchivePeriod(period string) (time.Duration, error) {
+	switch period {
+	case "":
+		return 0, nil
+	case "1d":
+		return 24 * time.Hour, nil
+	case "1w":
+		return 7 * 24 * time.Hour, nil
+	case "1m":
+		return 30 * 24 * time.Hour, nil
+	case "3m":
+		return 90 * 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("invalid auto-archive period: %s", period)
+	}
 }
 
 // buildMigrationContext creates a MigrationContext from the current configuration.

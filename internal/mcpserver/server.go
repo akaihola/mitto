@@ -62,12 +62,13 @@ type Server struct {
 	stdioSession *mcp.ServerSession
 	stdioDone    chan struct{}
 
-	mu             sync.RWMutex
-	store          *session.Store
-	config         *config.Config
-	sessionManager SessionManager
-	running        bool
-	shutdown       bool
+	mu               sync.RWMutex
+	store            *session.Store
+	config           *config.Config
+	sessionManager   SessionManager
+	auxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
+	running          bool
+	shutdown         bool
 
 	// Session registry for session-scoped tools.
 	// Maps session_id -> registeredSession for routing UI prompts and checking permissions.
@@ -77,9 +78,23 @@ type Server struct {
 	// Pending request registry for correlating MCP requests with Mitto sessions.
 	// When the ACP layer sees a tool_call for mitto_get_current_session, it registers
 	// the request_id -> session_id mapping here. The MCP handler then looks it up.
-	// Maps request_id -> pendingRequest
+	// Maps request_id -> FIFO queue of pendingRequests (handles concurrent calls with same key).
 	pendingRequestsMu sync.RWMutex
-	pendingRequests   map[string]*pendingRequest
+	pendingRequests   map[string][]*pendingRequest
+
+	// MCP session ID -> Mitto session ID cache.
+	// After a successful get_current resolution, we cache the mapping from the MCP
+	// protocol session ID (from Mcp-Session-Id header) to the Mitto session ID.
+	// This provides a reliable Phase 3 fallback for subsequent tool calls from the
+	// same MCP client, avoiding re-correlation.
+	mcpSessionMapMu sync.RWMutex
+	mcpSessionMap   map[string]string
+
+	// Parent-child task coordination.
+	// Maps parent_session_id -> *childReportCollector for collecting children's progress reports.
+	// Collectors persist for the lifetime of the parent session (cleaned up in UnregisterSession).
+	childReportCollectorsMu sync.Mutex
+	childReportCollectors   map[string]*childReportCollector
 }
 
 // registeredSession holds information about a registered session.
@@ -111,6 +126,8 @@ type Dependencies struct {
 	Config *config.Config
 	// SessionManager is optional - provides info about running sessions
 	SessionManager SessionManager
+	// AuxiliaryManager is optional - provides workspace-scoped auxiliary operations
+	AuxiliaryManager *auxiliary.WorkspaceAuxiliaryManager
 }
 
 // SessionManager interface for checking session status and managing sessions.
@@ -124,6 +141,13 @@ type SessionManager interface {
 	CloseSession(sessionID, reason string)
 	// ResumeSession resumes an archived session by starting a new ACP connection.
 	ResumeSession(sessionID, sessionName, workingDir string) (BackgroundSession, error)
+	// GetWorkspacesForFolder returns all workspace configurations for the given folder.
+	// Multiple workspaces may share the same folder with different ACP servers.
+	GetWorkspacesForFolder(folder string) []config.WorkspaceSettings
+	// BroadcastSessionCreated broadcasts a session_created event to all connected clients.
+	BroadcastSessionCreated(sessionID, name, acpServer, workingDir, parentSessionID string)
+	// BroadcastSessionArchived broadcasts a session_archived event to all connected clients.
+	BroadcastSessionArchived(sessionID string, archived bool)
 }
 
 // BackgroundSession interface for session info.
@@ -131,6 +155,13 @@ type BackgroundSession interface {
 	IsPrompting() bool
 	GetEventCount() int
 	GetMaxAssignedSeq() int64
+	// TryProcessQueuedMessage attempts to process the next queued message if the session is idle.
+	// Returns true if a message was sent.
+	TryProcessQueuedMessage() bool
+	// WaitForResponseComplete waits for the current prompt to complete, if one is in progress.
+	// Returns true if the prompt completed within the timeout, false if it timed out.
+	// If no prompt is in progress, returns immediately with true.
+	WaitForResponseComplete(timeout time.Duration) bool
 }
 
 // Config holds the configuration for the MCP server.
@@ -167,15 +198,17 @@ func NewServer(cfg Config, deps Dependencies) (*Server, error) {
 	}
 
 	s := &Server{
-		logger:          logger,
-		host:            cfg.Host,
-		port:            cfg.Port,
-		mode:            cfg.Mode,
-		store:           deps.Store,
-		config:          deps.Config,
-		sessionManager:  deps.SessionManager,
-		sessions:        make(map[string]*registeredSession),
-		pendingRequests: make(map[string]*pendingRequest),
+		logger:                logger,
+		host:                  cfg.Host,
+		port:                  cfg.Port,
+		mode:                  cfg.Mode,
+		store:                 deps.Store,
+		config:                deps.Config,
+		sessionManager:        deps.SessionManager,
+		sessions:              make(map[string]*registeredSession),
+		pendingRequests:       make(map[string][]*pendingRequest),
+		mcpSessionMap:         make(map[string]string),
+		childReportCollectors: make(map[string]*childReportCollector),
 	}
 
 	// Create MCP server
@@ -431,6 +464,20 @@ func (s *Server) UnregisterSession(sessionID string) {
 	delete(s.sessions, sessionID)
 	s.sessionsMu.Unlock()
 
+	// Clean up child report collector for this parent session
+	s.childReportCollectorsMu.Lock()
+	delete(s.childReportCollectors, sessionID)
+	s.childReportCollectorsMu.Unlock()
+
+	// Clean up MCP session cache entries pointing to this session
+	s.mcpSessionMapMu.Lock()
+	for mcpID, mittoID := range s.mcpSessionMap {
+		if mittoID == sessionID {
+			delete(s.mcpSessionMap, mcpID)
+		}
+	}
+	s.mcpSessionMapMu.Unlock()
+
 	s.logger.Info("Session unregistered from MCP server", "session_id", sessionID)
 }
 
@@ -440,6 +487,23 @@ func (s *Server) getSession(sessionID string) *registeredSession {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
 	return s.sessions[sessionID]
+}
+
+// getOrCreateCollector returns the existing child report collector for the given parent session ID,
+// or creates a new one if it doesn't exist. The collector persists for the lifetime of the parent session.
+func (s *Server) getOrCreateCollector(parentSessionID string) *childReportCollector {
+	s.childReportCollectorsMu.Lock()
+	defer s.childReportCollectorsMu.Unlock()
+
+	collector := s.childReportCollectors[parentSessionID]
+	if collector == nil {
+		collector = &childReportCollector{
+			parentSessionID: parentSessionID,
+			reports:         make(map[string]*childReport),
+		}
+		s.childReportCollectors[parentSessionID] = collector
+	}
+	return collector
 }
 
 // resolveSelfID resolves the provided session_id to a real session ID.
@@ -500,6 +564,8 @@ func (s *Server) checkSessionFlag(sessionID string, flagName string) bool {
 // This is called by the ACP/web layer when it sees a tool_call event for
 // mitto_get_current_session. The MCP handler then uses WaitForPendingRequest
 // to look up the session_id.
+// Uses a FIFO queue per key to handle concurrent calls with the same key
+// (e.g., multiple sessions calling get_current with self_id="init").
 func (s *Server) RegisterPendingRequest(requestID, sessionID string) {
 	if requestID == "" || sessionID == "" {
 		return
@@ -508,14 +574,15 @@ func (s *Server) RegisterPendingRequest(requestID, sessionID string) {
 	s.pendingRequestsMu.Lock()
 	defer s.pendingRequestsMu.Unlock()
 
-	s.pendingRequests[requestID] = &pendingRequest{
+	s.pendingRequests[requestID] = append(s.pendingRequests[requestID], &pendingRequest{
 		sessionID:    sessionID,
 		registeredAt: time.Now(),
-	}
+	})
 
 	s.logger.Debug("Pending request registered",
 		"request_id", requestID,
 		"session_id", sessionID,
+		"queue_depth", len(s.pendingRequests[requestID]),
 	)
 
 	// Cleanup expired entries while we have the lock
@@ -524,6 +591,8 @@ func (s *Server) RegisterPendingRequest(requestID, sessionID string) {
 
 // WaitForPendingRequest waits for a pending request to be registered and returns the session ID.
 // It polls until the request is found or the timeout expires.
+// Uses FIFO ordering: when multiple sessions register the same key (e.g., "init"),
+// the first registration is consumed first.
 // Returns empty string if the request is not found within the timeout.
 func (s *Server) WaitForPendingRequest(requestID string) string {
 	if requestID == "" {
@@ -534,20 +603,32 @@ func (s *Server) WaitForPendingRequest(requestID string) string {
 
 	for time.Now().Before(deadline) {
 		s.pendingRequestsMu.RLock()
-		req, exists := s.pendingRequests[requestID]
+		queue, exists := s.pendingRequests[requestID]
+		hasEntries := exists && len(queue) > 0
 		s.pendingRequestsMu.RUnlock()
 
-		if exists {
+		if hasEntries {
+			// Pop the first entry (FIFO) under write lock
+			s.pendingRequestsMu.Lock()
+			queue = s.pendingRequests[requestID]
+			if len(queue) == 0 {
+				// Race: another goroutine consumed it between RLock and Lock
+				s.pendingRequestsMu.Unlock()
+				time.Sleep(pendingRequestPollInterval)
+				continue
+			}
+			req := queue[0]
+			if len(queue) == 1 {
+				delete(s.pendingRequests, requestID)
+			} else {
+				s.pendingRequests[requestID] = queue[1:]
+			}
+			s.pendingRequestsMu.Unlock()
+
 			s.logger.Debug("Pending request found",
 				"request_id", requestID,
 				"session_id", req.sessionID,
 			)
-
-			// Remove the pending request (one-time use)
-			s.pendingRequestsMu.Lock()
-			delete(s.pendingRequests, requestID)
-			s.pendingRequestsMu.Unlock()
-
 			return req.sessionID
 		}
 
@@ -565,12 +646,75 @@ func (s *Server) WaitForPendingRequest(requestID string) string {
 // Must be called with pendingRequestsMu held.
 func (s *Server) cleanupExpiredPendingRequestsLocked() {
 	now := time.Now()
-	for reqID, req := range s.pendingRequests {
-		if now.Sub(req.registeredAt) > pendingRequestExpiry {
+	for reqID, queue := range s.pendingRequests {
+		// Filter out expired entries from the queue
+		n := 0
+		for _, req := range queue {
+			if now.Sub(req.registeredAt) <= pendingRequestExpiry {
+				queue[n] = req
+				n++
+			}
+		}
+		if n == 0 {
 			delete(s.pendingRequests, reqID)
-			s.logger.Debug("Expired pending request removed", "request_id", reqID)
+			s.logger.Debug("Expired pending request queue removed", "request_id", reqID)
+		} else {
+			s.pendingRequests[reqID] = queue[:n]
 		}
 	}
+}
+
+// cacheMCPSession stores a mapping from MCP protocol session ID to Mitto session ID.
+// This is called after a successful get_current resolution to enable Phase 3 lookups.
+func (s *Server) cacheMCPSession(mcpSessionID, mittoSessionID string) {
+	if mcpSessionID == "" || mittoSessionID == "" {
+		return
+	}
+	s.mcpSessionMapMu.Lock()
+	defer s.mcpSessionMapMu.Unlock()
+	s.mcpSessionMap[mcpSessionID] = mittoSessionID
+	s.logger.Debug("MCP session cached",
+		"mcp_session_id", mcpSessionID,
+		"mitto_session_id", mittoSessionID,
+	)
+}
+
+// lookupMCPSession looks up a Mitto session ID by MCP protocol session ID.
+func (s *Server) lookupMCPSession(mcpSessionID string) string {
+	if mcpSessionID == "" {
+		return ""
+	}
+	s.mcpSessionMapMu.RLock()
+	defer s.mcpSessionMapMu.RUnlock()
+	return s.mcpSessionMap[mcpSessionID]
+}
+
+// resolveSelfIDWithMCP resolves self_id with an additional Phase 3: MCP session ID lookup.
+// This should be used by tool handlers that have access to the MCP request.
+func (s *Server) resolveSelfIDWithMCP(inputSessionID string, req *mcp.CallToolRequest) string {
+	// Phase 1 + Phase 2 (existing)
+	result := s.resolveSelfID(inputSessionID)
+	if result != "" {
+		return result
+	}
+
+	// Phase 3: MCP session ID lookup
+	// After a successful get_current call, the MCP session → Mitto session mapping
+	// is cached. This handles subsequent calls from the same MCP client even if
+	// self_id is wrong or the correlation mechanism fails.
+	if req != nil && req.Session != nil {
+		mcpSessionID := req.Session.ID()
+		if cached := s.lookupMCPSession(mcpSessionID); cached != "" {
+			s.logger.Debug("Session resolved via MCP session cache",
+				"input_session_id", inputSessionID,
+				"mcp_session_id", mcpSessionID,
+				"resolved_session_id", cached,
+			)
+			return cached
+		}
+	}
+
+	return ""
 }
 
 // permissionError returns a formatted error for tools that require a specific flag.
@@ -630,6 +774,24 @@ func (s *Server) buildConversationDetails(meta session.Metadata, sessionFolder s
 		}
 	}
 
+	// Populate available ACP servers from config
+	s.mu.RLock()
+	cfg := s.config
+	s.mu.RUnlock()
+
+	if cfg != nil && len(cfg.ACPServers) > 0 {
+		servers := make([]AvailableACPServer, 0, len(cfg.ACPServers))
+		for _, srv := range cfg.ACPServers {
+			servers = append(servers, AvailableACPServer{
+				Name:    srv.Name,
+				Type:    srv.GetType(),
+				Tags:    srv.Tags,
+				Current: srv.Name == meta.ACPServer,
+			})
+		}
+		details.AvailableACPServers = servers
+	}
+
 	return details
 }
 
@@ -640,7 +802,8 @@ func (s *Server) registerGlobalTools(mcpSrv *mcp.Server, deps Dependencies) {
 		Name: "mitto_conversation_list",
 		Description: "List all existing Mitto conversations with metadata including title, dates, message count, prompting status, last sequence, and session folder. " +
 			"Use this to find conversation IDs for other tools like 'mitto_conversation_get' or 'mitto_conversation_send_prompt'. " +
-			"To CREATE a new conversation, use 'mitto_conversation_start' instead. Always available.",
+			"To CREATE a new conversation, use 'mitto_conversation_new' instead. Always available. " +
+			"All parameters are optional filters — omit them to list all conversations.",
 	}, s.createListConversationsHandler(deps.SessionManager))
 
 	// mitto_get_config tool - always available
@@ -683,7 +846,7 @@ func (s *Server) registerSessionScopedTools(mcpSrv *mcp.Server) {
 		Name: "mitto_conversation_send_prompt",
 		Description: "Send a message/prompt to an EXISTING conversation (identified by conversation_id). " +
 			"The prompt is added to that conversation's queue and will be processed when the target agent becomes idle. " +
-			"Use 'mitto_conversation_list' first to find existing conversation IDs, or use an ID returned by 'mitto_conversation_start'. " +
+			"Use 'mitto_conversation_list' first to find existing conversation IDs, or use an ID returned by 'mitto_conversation_new'. " +
 			"Requires 'Can Send Prompt' flag to be enabled. " +
 			selfIDNote,
 	}, s.handleSendPromptToConversation)
@@ -715,16 +878,18 @@ func (s *Server) registerSessionScopedTools(mcpSrv *mcp.Server) {
 			selfIDNote,
 	}, s.handleOptionsCombo)
 
-	// mitto_conversation_start - Start a new conversation
+	// mitto_conversation_new - Start a new conversation
 	mcp.AddTool(mcpSrv, &mcp.Tool{
-		Name: "mitto_conversation_start",
+		Name: "mitto_conversation_new",
 		Description: "USE THIS TOOL TO CREATE A NEW CONVERSATION - no browser or UI interaction needed! " +
 			"This tool programmatically creates and starts a NEW agent conversation that runs in parallel with your current session. " +
 			"When a user asks you to 'create a new conversation', 'start a new session', or 'investigate something in a new conversation', " +
 			"call this tool directly instead of trying to click buttons or navigate a UI. " +
 			"This spawns a separate AI agent that can work independently on the task you specify. " +
 			"Use this to delegate work, run background tasks, or parallelize complex work across multiple agents. " +
-			"The new conversation inherits your workspace and ACP server configuration. " +
+			"The new conversation inherits your workspace configuration. By default it also inherits your ACP server, " +
+			"but you can specify a different one via the optional 'acp_server' parameter " +
+			"(use 'mitto_conversation_get_current' to see available ACP servers in the 'available_acp_servers' field). " +
 			"Optionally provide a 'title' for the conversation and an 'initial_prompt' to start the agent working immediately. " +
 			"Requires 'Can start conversation' flag to be enabled in Advanced Settings (disabled by default for security). " +
 			"Note: Conversations created by this tool cannot spawn further conversations (to prevent infinite recursion). " +
@@ -772,6 +937,50 @@ func (s *Server) registerSessionScopedTools(mcpSrv *mcp.Server) {
 			"Use 'mitto_conversation_list' first to find available conversation IDs. " +
 			selfIDNote,
 	}, s.handleArchiveConversation)
+
+	// mitto_conversation_delete - Delete (archive) a child conversation
+	mcp.AddTool(mcpSrv, &mcp.Tool{
+		Name: "mitto_conversation_delete",
+		Description: "Delete a child conversation. " +
+			"This archives the child conversation, gracefully stopping any active agent response and closing its ACP connection. " +
+			"The caller MUST be the parent of the target conversation (verified via the parent-child relationship). " +
+			"Deleted conversations become read-only and will no longer accept prompts. " +
+			selfIDNote,
+	}, s.handleDeleteConversation)
+
+	// mitto_conversation_wait - Wait until something happens in a conversation
+	mcp.AddTool(mcpSrv, &mcp.Tool{
+		Name: "mitto_conversation_wait",
+		Description: "Wait until something happens in a conversation. " +
+			"Currently supports: 'agent_responded' — blocks until the agent finishes responding. " +
+			"Returns immediately if the condition is already met (e.g., agent is not currently responding). " +
+			selfIDNote,
+	}, s.handleConversationWait)
+
+	// mitto_children_tasks_wait - Wait for children to report progress
+	mcp.AddTool(mcpSrv, &mcp.Tool{
+		Name: "mitto_children_tasks_wait",
+		Description: "Send a progress inquiry to multiple child conversations and BLOCK until all of them report back. " +
+			"For each child, the provided prompt (plus reporting instructions) is enqueued. " +
+			"If prompt is empty or omitted, no message is sent — the tool just waits for children to report " +
+			"(useful for retrying after a timeout without re-enqueuing duplicate messages). " +
+			"Duplicate messages are also prevented: if a child already has a pending message from this parent " +
+			"in its queue, the prompt is skipped for that child. " +
+			"This tool blocks until all children have reported or the timeout expires. " +
+			"Returns a consolidated report from all children. " +
+			"Requires 'Can Send Prompt' flag to be enabled. " +
+			selfIDNote,
+	}, s.handleChildrenTasksWait)
+
+	// mitto_children_tasks_report - Report task progress back to parent
+	mcp.AddTool(mcpSrv, &mcp.Tool{
+		Name: "mitto_children_tasks_report",
+		Description: "Report task completion or progress back to a waiting parent conversation. " +
+			"The parent must have previously called mitto_children_tasks_wait with this conversation's ID in the children_list. " +
+			"Provide a status (e.g. 'completed', 'in_progress', 'failed'), a summary of your findings, " +
+			"and optionally details with additional information. " +
+			selfIDNote,
+	}, s.handleChildrenTasksReport)
 }
 
 // ListConversationsOutput wraps the list of conversations for MCP output schema compliance.
@@ -780,8 +989,8 @@ type ListConversationsOutput struct {
 }
 
 // createListConversationsHandler creates the handler for list_conversations tool.
-func (s *Server) createListConversationsHandler(sm SessionManager) mcp.ToolHandlerFor[struct{}, ListConversationsOutput] {
-	return func(ctx context.Context, req *mcp.CallToolRequest, input struct{}) (*mcp.CallToolResult, ListConversationsOutput, error) {
+func (s *Server) createListConversationsHandler(sm SessionManager) mcp.ToolHandlerFor[ListConversationsInput, ListConversationsOutput] {
+	return func(ctx context.Context, req *mcp.CallToolRequest, input ListConversationsInput) (*mcp.CallToolResult, ListConversationsOutput, error) {
 		s.mu.RLock()
 		store := s.store
 		s.mu.RUnlock()
@@ -797,6 +1006,20 @@ func (s *Server) createListConversationsHandler(sm SessionManager) mcp.ToolHandl
 
 		conversations := make([]ConversationInfo, 0, len(sessions))
 		for _, meta := range sessions {
+			// Apply filters before building full info
+			if input.WorkingDir != nil && meta.WorkingDir != *input.WorkingDir {
+				continue
+			}
+			if input.Archived != nil && meta.Archived != *input.Archived {
+				continue
+			}
+			if input.ACPServer != nil && meta.ACPServer != *input.ACPServer {
+				continue
+			}
+			if input.ExcludeSelf != nil && meta.SessionID == *input.ExcludeSelf {
+				continue
+			}
+
 			info := ConversationInfo{
 				SessionID:         meta.SessionID,
 				Title:             meta.Name,
@@ -828,6 +1051,11 @@ func (s *Server) createListConversationsHandler(sm SessionManager) mcp.ToolHandl
 					info.IsPrompting = bs.IsPrompting()
 					info.LastSeq = bs.GetMaxAssignedSeq()
 				}
+			}
+
+			// Apply is_running filter after runtime status is resolved
+			if input.IsRunning != nil && info.IsRunning != *input.IsRunning {
+				continue
 			}
 
 			conversations = append(conversations, info)
@@ -900,10 +1128,11 @@ func (s *Server) handleGetCurrentSession(ctx context.Context, req *mcp.CallToolR
 		)
 	}
 
-	// Resolve the self_id to a real session ID using two-phase lookup:
+	// Resolve the self_id to a real session ID using three-phase lookup:
 	// 1. Direct lookup if session_id is already a registered session
 	// 2. Correlation lookup via pending request registration (for ACP-routed calls)
-	realSessionID := s.resolveSelfID(input.SelfID)
+	// 3. MCP session ID cache lookup (for subsequent calls from the same MCP client)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, CurrentSessionOutput{}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved. "+
@@ -931,6 +1160,15 @@ func (s *Server) handleGetCurrentSession(ctx context.Context, req *mcp.CallToolR
 		return nil, CurrentSessionOutput{}, fmt.Errorf("failed to get session: %w", err)
 	}
 
+	// Cache the MCP session → Mitto session mapping for Phase 3 lookups.
+	// After this point, all subsequent calls from the same MCP client can be
+	// resolved via the MCP session ID cache, even if self_id is wrong.
+	if req != nil && req.Session != nil {
+		if mcpSessionID := req.Session.ID(); mcpSessionID != "" {
+			s.cacheMCPSession(mcpSessionID, realSessionID)
+		}
+	}
+
 	// Build unified conversation details
 	output := s.buildConversationDetails(meta, store.SessionDir(meta.SessionID))
 
@@ -951,7 +1189,7 @@ func (s *Server) handleSendPromptToConversation(ctx context.Context, req *mcp.Ca
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, SendPromptOutput{
 			Success: false,
@@ -1020,6 +1258,13 @@ func (s *Server) handleSendPromptToConversation(ctx context.Context, req *mcp.Ca
 		"message_id", msg.ID,
 		"queue_position", queueLen)
 
+	// Try to process the queued message immediately if agent is idle
+	if s.sessionManager != nil {
+		if bs := s.sessionManager.GetSession(input.ConversationID); bs != nil {
+			go bs.TryProcessQueuedMessage()
+		}
+	}
+
 	return nil, SendPromptOutput{
 		Success:       true,
 		MessageID:     msg.ID,
@@ -1043,7 +1288,7 @@ func (s *Server) handleAskYesNo(ctx context.Context, req *mcp.CallToolRequest, i
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, AskYesNoOutput{}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved",
@@ -1139,7 +1384,7 @@ func (s *Server) handleOptionsButtons(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, OptionsButtonsOutput{Index: -1}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved",
@@ -1250,7 +1495,7 @@ func (s *Server) handleOptionsCombo(ctx context.Context, req *mcp.CallToolReques
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, OptionsComboOutput{Index: -1}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved",
@@ -1346,14 +1591,15 @@ func (s *Server) handleOptionsCombo(ctx context.Context, req *mcp.CallToolReques
 	}, nil
 }
 
-// ConversationStartInput is the input for mitto_conversation_start tool.
+// ConversationStartInput is the input for mitto_conversation_new tool.
 type ConversationStartInput struct {
 	SelfID        string `json:"self_id"`                  // YOUR session ID (the caller)
 	Title         string `json:"title,omitempty"`          // Optional title for the new conversation
 	InitialPrompt string `json:"initial_prompt,omitempty"` // Optional initial message to queue
+	ACPServer     string `json:"acp_server,omitempty"`     // Optional ACP server name (defaults to parent's server)
 }
 
-// ConversationStartOutput is the output for mitto_conversation_start tool.
+// ConversationStartOutput is the output for mitto_conversation_new tool.
 // Embeds ConversationDetails for the newly created conversation.
 type ConversationStartOutput struct {
 	ConversationDetails        // Embedded conversation details
@@ -1368,7 +1614,7 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, ConversationStartOutput{}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved",
@@ -1396,8 +1642,7 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 	}
 
 	// Permission check: requires can_start_conversation flag
-	// Note: This is checked first since it's the most common reason for failure
-	// (flag defaults to false for security reasons)
+	// This allows users to disable conversation creation via the UI toggle
 	if !s.checkSessionFlag(realSessionID, session.FlagCanStartConversation) {
 		return nil, ConversationStartOutput{}, fmt.Errorf(
 			"the '%s' flag is not enabled for this session. Enable it in this session's Advanced Settings (gear icon) to allow creating new conversations",
@@ -1412,25 +1657,63 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 			sourceMeta.ParentSessionID)
 	}
 
+	// Check for duplicate title if title is provided
+	if input.Title != "" {
+		allSessions, err := store.List()
+		if err != nil {
+			return nil, ConversationStartOutput{}, fmt.Errorf("failed to check for duplicate titles: %v", err)
+		}
+		for _, existingMeta := range allSessions {
+			if existingMeta.Name == input.Title {
+				return nil, ConversationStartOutput{}, fmt.Errorf(
+					"a conversation with the title '%s' already exists (session_id: %s). Please choose a different title",
+					input.Title, existingMeta.SessionID)
+			}
+		}
+	}
+
+	// Determine which ACP server to use
+	acpServerName := sourceMeta.ACPServer // Default: inherit from parent
+	if input.ACPServer != "" {
+		// Validate the requested ACP server exists in config
+		s.mu.RLock()
+		cfg := s.config
+		s.mu.RUnlock()
+
+		if cfg == nil {
+			return nil, ConversationStartOutput{}, fmt.Errorf("server configuration not available")
+		}
+		if _, err := cfg.GetServer(input.ACPServer); err != nil {
+			return nil, ConversationStartOutput{}, fmt.Errorf(
+				"ACP server '%s' not found. Available servers: %v",
+				input.ACPServer, cfg.ServerNames())
+		}
+		acpServerName = input.ACPServer
+	}
+
 	// Create new session ID using the standard timestamp format
 	// This ensures compatibility with IsValidSessionID validation in the web layer
 	newSessionID := session.GenerateSessionID()
 
 	// Create the new session metadata
-	// NOTE: Recursion is prevented by setting can_start_conversation=false for child sessions.
-	// The parent check above (ParentSessionID != "") also blocks child sessions from creating new ones.
-	// TODO: Consider adding a max recursion depth counter in metadata as a defensive measure,
-	// though the current prevention logic should be sufficient.
+	// NOTE: Recursion is prevented by the ParentSessionID check above — children
+	// with a parent cannot create new conversations. When the parent is deleted,
+	// the child becomes an orphan (ParentSessionID is cleared) and can then create
+	// new conversations since it inherits the parent's flags including can_start_conversation.
+
+	// Inherit parent's advanced settings so orphaned children retain the same flags.
+	childSettings := make(map[string]bool)
+	for k, v := range sourceMeta.AdvancedSettings {
+		childSettings[k] = v
+	}
+
 	newMeta := session.Metadata{
-		SessionID:       newSessionID,
-		Name:            input.Title,
-		ACPServer:       sourceMeta.ACPServer,
-		WorkingDir:      sourceMeta.WorkingDir,
-		ParentSessionID: realSessionID, // Mark this session as a child
-		// Child sessions explicitly have can_start_conversation disabled to prevent infinite recursion
-		AdvancedSettings: map[string]bool{
-			session.FlagCanStartConversation: false,
-		},
+		SessionID:        newSessionID,
+		Name:             input.Title,
+		ACPServer:        acpServerName,
+		WorkingDir:       sourceMeta.WorkingDir,
+		ParentSessionID:  realSessionID, // Mark this session as a child
+		AdvancedSettings: childSettings,
 	}
 
 	// Create the session
@@ -1441,6 +1724,7 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 	s.logger.Info("New conversation created via MCP",
 		"new_session_id", newSessionID,
 		"parent_session_id", realSessionID,
+		"acp_server", acpServerName,
 		"working_dir", sourceMeta.WorkingDir,
 		"title", input.Title)
 
@@ -1451,9 +1735,41 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 		createdMeta = newMeta
 	}
 
+	// Start the ACP process for the new session.
+	// store.Create() only writes metadata to disk - we need to start a BackgroundSession
+	// with an actual ACP process so prompts can be executed.
+	var bs BackgroundSession
+	if s.sessionManager != nil {
+		var resumeErr error
+		bs, resumeErr = s.sessionManager.ResumeSession(newSessionID, input.Title, sourceMeta.WorkingDir)
+		if resumeErr != nil {
+			s.logger.Error("Failed to start ACP for new conversation",
+				"session_id", newSessionID,
+				"error", resumeErr)
+			// Session was created but ACP failed to start - clean up isn't needed
+			// since the session can be resumed later, but log the error
+		}
+	}
+
+	// Broadcast session creation to all global events clients
+	// This ensures the sidebar updates immediately when creating via MCP
+	if s.sessionManager != nil {
+		s.sessionManager.BroadcastSessionCreated(
+			newSessionID,
+			input.Title,
+			acpServerName,
+			sourceMeta.WorkingDir,
+			realSessionID, // parent_session_id
+		)
+	}
+
 	// Build unified conversation details
 	output := ConversationStartOutput{
 		ConversationDetails: s.buildConversationDetails(createdMeta, store.SessionDir(newSessionID)),
+	}
+	// Update runtime status to reflect the running ACP session
+	if bs != nil {
+		output.IsRunning = true
 	}
 
 	// If initial prompt provided, add it to the queue
@@ -1467,6 +1783,11 @@ func (s *Server) handleConversationStart(ctx context.Context, req *mcp.CallToolR
 		} else {
 			queueLen, _ := queue.Len()
 			output.QueuePosition = queueLen
+
+			// Try to process the queued message immediately if agent is idle
+			if bs != nil {
+				go bs.TryProcessQueuedMessage()
+			}
 		}
 	}
 
@@ -1499,7 +1820,7 @@ func (s *Server) handleGetConversationSummary(ctx context.Context, req *mcp.Call
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, GetConversationSummaryOutput{
 			Success: false,
@@ -1559,8 +1880,24 @@ func (s *Server) handleGetConversationSummary(ctx context.Context, req *mcp.Call
 		}, nil
 	}
 
-	// Generate summary using auxiliary session
-	summary, err := auxiliary.GenerateConversationSummary(ctx, conversationContent)
+	// Generate summary using workspace-scoped auxiliary session
+	// TODO: Get workspace UUID from session metadata when it's added
+	// For now, we'll return an error if auxiliary manager is not available
+	s.mu.RLock()
+	auxMgr := s.auxiliaryManager
+	s.mu.RUnlock()
+
+	if auxMgr == nil {
+		return nil, GetConversationSummaryOutput{
+			Success: false,
+			Error:   "conversation summary generation not available (auxiliary manager not configured)",
+		}, nil
+	}
+
+	// Use a placeholder workspace UUID for now
+	// TODO: Get actual workspace UUID from session metadata
+	workspaceUUID := "default"
+	summary, err := auxMgr.GenerateConversationSummary(ctx, workspaceUUID, conversationContent)
 	if err != nil {
 		return nil, GetConversationSummaryOutput{
 			Success: false,
@@ -1640,7 +1977,7 @@ func (s *Server) handleGetConversation(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, GetConversationOutput{}, fmt.Errorf(
 			"session not found: the self_id '%s' could not be resolved",
@@ -1738,7 +2075,7 @@ func (s *Server) handleSetPeriodic(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, SetPeriodicOutput{
 			Success: false,
@@ -1868,7 +2205,7 @@ func (s *Server) handleArchiveConversation(ctx context.Context, req *mcp.CallToo
 	}
 
 	// Resolve the self_id to a real session ID
-	realSessionID := s.resolveSelfID(input.SelfID)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
 	if realSessionID == "" {
 		return nil, ArchiveConversationOutput{
 			Success: false,
@@ -1948,6 +2285,11 @@ func (s *Server) handleArchiveConversation(ctx context.Context, req *mcp.CallToo
 		}, nil
 	}
 
+	// Broadcast the archived state change to all connected WebSocket clients
+	if s.sessionManager != nil {
+		s.sessionManager.BroadcastSessionArchived(input.ConversationID, archived)
+	}
+
 	// Handle unarchive lifecycle: restart ACP session
 	if !archived && sessionManager != nil {
 		_, err := sessionManager.ResumeSession(input.ConversationID, meta.Name, meta.WorkingDir)
@@ -1982,4 +2324,559 @@ func (s *Server) handleArchiveConversation(ctx context.Context, req *mcp.CallToo
 	}
 
 	return nil, output, nil
+}
+
+func (s *Server) handleDeleteConversation(ctx context.Context, req *mcp.CallToolRequest, input DeleteConversationInput) (*mcp.CallToolResult, DeleteConversationOutput, error) {
+	// Validate self_id
+	if input.SelfID == "" {
+		return nil, DeleteConversationOutput{Success: false, Error: "self_id is required"}, nil
+	}
+
+	// Validate conversation_id
+	if input.ConversationID == "" {
+		return nil, DeleteConversationOutput{Success: false, Error: "conversation_id is required"}, nil
+	}
+
+	// Resolve the self_id to a real session ID
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
+	if realSessionID == "" {
+		return nil, DeleteConversationOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found: the self_id '%s' could not be resolved", input.SelfID),
+		}, nil
+	}
+
+	// Check if source session is registered (must be running)
+	reg := s.getSession(realSessionID)
+	if reg == nil {
+		return nil, DeleteConversationOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found or not running: %s", realSessionID),
+		}, nil
+	}
+
+	s.mu.RLock()
+	store := s.store
+	sessionManager := s.sessionManager
+	s.mu.RUnlock()
+
+	if store == nil {
+		return nil, DeleteConversationOutput{Success: false, Error: "session store not available"}, nil
+	}
+
+	// Verify target conversation exists
+	meta, err := store.GetMetadata(input.ConversationID)
+	if err != nil {
+		return nil, DeleteConversationOutput{
+			Success: false,
+			Error:   fmt.Sprintf("conversation not found: %s", input.ConversationID),
+		}, nil
+	}
+
+	// Security check: caller must be the parent of the target conversation
+	if meta.ParentSessionID != realSessionID {
+		return nil, DeleteConversationOutput{
+			Success: false,
+			Error:   "permission denied: can only delete your own child conversations",
+		}, nil
+	}
+
+	// Gracefully stop the child if it's running
+	if sessionManager != nil {
+		reason := "deleted_by_parent_via_mcp"
+		if !sessionManager.CloseSessionGracefully(input.ConversationID, reason, archiveWaitTimeout) {
+			s.logger.Warn("Timeout waiting for response before deleting child via MCP, proceeding anyway",
+				"parent_session", realSessionID,
+				"child_session", input.ConversationID)
+			sessionManager.CloseSession(input.ConversationID, "deleted_by_parent_timeout_via_mcp")
+		}
+	}
+
+	// Archive the conversation (mark as read-only rather than permanently deleting)
+	err = store.UpdateMetadata(input.ConversationID, func(m *session.Metadata) {
+		m.Archived = true
+		m.ArchivedAt = time.Now()
+	})
+	if err != nil {
+		return nil, DeleteConversationOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to archive conversation: %v", err),
+		}, nil
+	}
+
+	// Broadcast the archived state change to all connected WebSocket clients
+	if s.sessionManager != nil {
+		s.sessionManager.BroadcastSessionArchived(input.ConversationID, true)
+	}
+
+	s.logger.Info("Child conversation deleted (archived) by parent via MCP",
+		"parent_session", realSessionID,
+		"child_session", input.ConversationID)
+
+	return nil, DeleteConversationOutput{
+		Success:        true,
+		ConversationID: input.ConversationID,
+	}, nil
+}
+
+// =============================================================================
+// Parent-Child Task Coordination Handlers
+// =============================================================================
+
+// =============================================================================
+// Conversation Wait
+// =============================================================================
+
+// defaultConversationWaitTimeout is the default timeout for mitto_conversation_wait.
+const defaultConversationWaitTimeout = 10 * time.Minute
+
+// waitConditionAgentResponded is the "what" value for waiting until the agent finishes responding.
+const waitConditionAgentResponded = "agent_responded"
+
+func (s *Server) handleConversationWait(ctx context.Context, req *mcp.CallToolRequest, input ConversationWaitInput) (*mcp.CallToolResult, ConversationWaitOutput, error) {
+	// Validate self_id
+	if input.SelfID == "" {
+		return nil, ConversationWaitOutput{Error: "self_id is required"}, nil
+	}
+
+	// Validate conversation_id
+	if input.ConversationID == "" {
+		return nil, ConversationWaitOutput{Error: "conversation_id is required"}, nil
+	}
+
+	// Validate "what" parameter
+	if input.What == "" {
+		return nil, ConversationWaitOutput{Error: "what is required"}, nil
+	}
+	if input.What != waitConditionAgentResponded {
+		return nil, ConversationWaitOutput{
+			Error: fmt.Sprintf("unsupported wait condition: %q (supported: %q)", input.What, waitConditionAgentResponded),
+		}, nil
+	}
+
+	// Resolve the self_id to a real session ID
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
+	if realSessionID == "" {
+		return nil, ConversationWaitOutput{
+			Error: fmt.Sprintf("session not found: the self_id '%s' could not be resolved", input.SelfID),
+		}, nil
+	}
+
+	// Check if source session is registered (must be running to use this tool)
+	reg := s.getSession(realSessionID)
+	if reg == nil {
+		return nil, ConversationWaitOutput{
+			Error: fmt.Sprintf("session not found or not running: %s", realSessionID),
+		}, nil
+	}
+
+	// Get the target session via SessionManager
+	if s.sessionManager == nil {
+		return nil, ConversationWaitOutput{Error: "session manager not available"}, nil
+	}
+	targetBS := s.sessionManager.GetSession(input.ConversationID)
+	if targetBS == nil {
+		return nil, ConversationWaitOutput{
+			Error: fmt.Sprintf("target conversation not running: %s", input.ConversationID),
+		}, nil
+	}
+
+	// If the agent is not currently responding, return immediately
+	if !targetBS.IsPrompting() {
+		s.logger.Debug("Conversation wait: agent not prompting, returning immediately",
+			"source_session", realSessionID,
+			"target_conversation", input.ConversationID,
+			"what", input.What)
+		return nil, ConversationWaitOutput{
+			Success: true,
+			What:    input.What,
+		}, nil
+	}
+
+	// Determine timeout
+	timeout := time.Duration(input.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = defaultConversationWaitTimeout
+	}
+
+	s.logger.Info("Waiting for conversation condition",
+		"source_session", realSessionID,
+		"target_conversation", input.ConversationID,
+		"what", input.What,
+		"timeout", timeout)
+
+	// Wait for the agent to finish responding, respecting context cancellation.
+	// WaitForResponseComplete blocks with its own timeout, but we also need to
+	// handle ctx.Done() for MCP-level cancellation.
+	done := make(chan bool, 1)
+	go func() {
+		done <- targetBS.WaitForResponseComplete(timeout)
+	}()
+
+	select {
+	case completed := <-done:
+		if completed {
+			s.logger.Info("Conversation wait condition met",
+				"source_session", realSessionID,
+				"target_conversation", input.ConversationID,
+				"what", input.What)
+			return nil, ConversationWaitOutput{
+				Success: true,
+				What:    input.What,
+			}, nil
+		}
+		// Timed out
+		s.logger.Warn("Conversation wait timed out",
+			"source_session", realSessionID,
+			"target_conversation", input.ConversationID,
+			"what", input.What,
+			"timeout", timeout)
+		return nil, ConversationWaitOutput{
+			Success:  true,
+			What:     input.What,
+			TimedOut: true,
+		}, nil
+	case <-ctx.Done():
+		return nil, ConversationWaitOutput{
+			Error: "context cancelled while waiting",
+		}, nil
+	}
+}
+
+// =============================================================================
+// Children Tasks Coordination
+// =============================================================================
+
+// defaultChildrenTasksTimeout is the default timeout for waiting for children to report.
+const defaultChildrenTasksTimeout = 10 * time.Minute
+
+// childrenReportSuffix is appended to the prompt sent to each child,
+// instructing them to call mitto_children_tasks_report.
+const childrenReportSuffix = "\n\nIMPORTANT: When you are done, report your results using the `mitto_children_tasks_report` " +
+	"MCP tool with your `self_id`, a `status` (e.g. \"completed\", \"in_progress\", \"failed\"), " +
+	"a `summary` of your findings, and optionally `details` with additional information."
+
+func (s *Server) handleChildrenTasksWait(ctx context.Context, req *mcp.CallToolRequest, input ChildrenTasksWaitInput) (*mcp.CallToolResult, ChildrenTasksWaitOutput, error) {
+	// Validate self_id
+	if input.SelfID == "" {
+		return nil, ChildrenTasksWaitOutput{Success: false, Error: "self_id is required"}, nil
+	}
+
+	// Validate children_list
+	if len(input.ChildrenList) == 0 {
+		return nil, ChildrenTasksWaitOutput{Success: false, Error: "children_list must contain at least one child conversation ID"}, nil
+	}
+
+	// Resolve the self_id to a real session ID (parent)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
+	if realSessionID == "" {
+		return nil, ChildrenTasksWaitOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found: the self_id '%s' could not be resolved", input.SelfID),
+		}, nil
+	}
+
+	// Check if source session is registered
+	reg := s.getSession(realSessionID)
+	if reg == nil {
+		return nil, ChildrenTasksWaitOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found or not running: %s", realSessionID),
+		}, nil
+	}
+
+	// Permission check: requires can_send_prompt (we are sending prompts to children)
+	if !s.checkSessionFlag(realSessionID, session.FlagCanSendPrompt) {
+		return nil, ChildrenTasksWaitOutput{
+			Success: false,
+			Error:   fmt.Sprintf("tool 'mitto_children_tasks_wait' requires the 'Can Send Prompt' (%s) flag to be enabled in Advanced Settings", session.FlagCanSendPrompt),
+		}, nil
+	}
+
+	s.mu.RLock()
+	store := s.store
+	s.mu.RUnlock()
+
+	if store == nil {
+		return nil, ChildrenTasksWaitOutput{Success: false, Error: "session store not available"}, nil
+	}
+
+	// Validate each child exists and is actually a child of this parent.
+	// Also check if each child is currently running.
+	validChildren := make([]string, 0, len(input.ChildrenList))
+	runningChildren := make([]string, 0, len(input.ChildrenList))
+	notRunningChildren := make([]string, 0)
+	var warnings []string
+
+	for _, childID := range input.ChildrenList {
+		childMeta, err := store.GetMetadata(childID)
+		if err != nil {
+			s.logger.Warn("Child conversation not found, skipping",
+				"parent_session", realSessionID,
+				"child_session", childID,
+				"error", err)
+			continue
+		}
+		if childMeta.ParentSessionID != realSessionID {
+			s.logger.Warn("Conversation is not a child of this parent, skipping",
+				"parent_session", realSessionID,
+				"child_session", childID,
+				"actual_parent", childMeta.ParentSessionID)
+			continue
+		}
+		validChildren = append(validChildren, childID)
+
+		// Check if the child is currently running (registered with MCP server)
+		childReg := s.getSession(childID)
+		if childReg == nil {
+			notRunningChildren = append(notRunningChildren, childID)
+			reason := "not running"
+			if childMeta.Archived {
+				reason = "archived"
+			}
+			warnings = append(warnings, fmt.Sprintf("child %s is %s and cannot process prompts", childID, reason))
+			s.logger.Warn("Child conversation is not running",
+				"parent_session", realSessionID,
+				"child_session", childID,
+				"archived", childMeta.Archived)
+		} else {
+			runningChildren = append(runningChildren, childID)
+		}
+	}
+
+	if len(validChildren) == 0 {
+		return nil, ChildrenTasksWaitOutput{
+			Success: false,
+			Error:   "none of the provided conversation IDs are valid children of this session",
+		}, nil
+	}
+
+	// Get-or-create the persistent child report collector for this parent.
+	collector := s.getOrCreateCollector(realSessionID)
+
+	// If ALL valid children are not running, return immediately with not_running status.
+	// We still register them in the collector for record-keeping.
+	if len(runningChildren) == 0 {
+		reports := make(map[string]ChildReportInfo, len(notRunningChildren))
+		for _, childID := range notRunningChildren {
+			reports[childID] = ChildReportInfo{
+				Completed: false,
+				Status:    "not_running",
+			}
+		}
+		return nil, ChildrenTasksWaitOutput{
+			Success:  true,
+			Reports:  reports,
+			Warnings: warnings,
+		}, nil
+	}
+
+	// Set up wait signaling. startWait clears all previous reports and registers
+	// all running children as pending, starting a fresh collection cycle.
+	waitCh, _ := collector.startWait(runningChildren)
+	defer collector.clearWait()
+
+	// Build the prompt to send to all running children.
+	// If no prompt is provided, skip sending entirely (wait-only mode).
+	// This allows callers to retry waits without re-enqueuing duplicate messages.
+	promptText := input.Prompt
+	sendPrompt := promptText != ""
+
+	if sendPrompt {
+		promptText += childrenReportSuffix
+	}
+
+	// Send prompt to running children (unless wait-only mode)
+	if sendPrompt {
+		for _, childID := range runningChildren {
+			queue := store.Queue(childID)
+
+			// Dedup: skip if there's already a pending message from this parent in the child's queue.
+			// This prevents duplicate report-request messages from accumulating when the parent
+			// retries after a timeout and the child hasn't consumed the previous message yet.
+			existingMsgs, _ := queue.List()
+			alreadyQueued := false
+			for _, m := range existingMsgs {
+				if m.ClientID == realSessionID {
+					alreadyQueued = true
+					break
+				}
+			}
+			if alreadyQueued {
+				s.logger.Debug("Skipping duplicate prompt — parent already has a pending message in child's queue",
+					"parent_session", realSessionID,
+					"child_session", childID)
+				continue
+			}
+
+			msg, err := queue.Add(promptText, nil, nil, realSessionID, 0)
+			if err != nil {
+				s.logger.Warn("Failed to enqueue prompt to child",
+					"parent_session", realSessionID,
+					"child_session", childID,
+					"error", err)
+				continue
+			}
+
+			s.logger.Info("Progress inquiry sent to child",
+				"parent_session", realSessionID,
+				"child_session", childID,
+				"message_id", msg.ID)
+
+			// Try to process the queued message immediately if agent is idle
+			if s.sessionManager != nil {
+				if bs := s.sessionManager.GetSession(childID); bs != nil {
+					go bs.TryProcessQueuedMessage()
+				}
+			}
+		}
+	}
+
+	// Determine timeout
+	timeout := time.Duration(input.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = defaultChildrenTasksTimeout
+	}
+
+	// Block until all running children report or timeout
+	s.logger.Info("Waiting for children to report",
+		"parent_session", realSessionID,
+		"running_children", len(runningChildren),
+		"not_running_children", len(notRunningChildren),
+		"timeout", timeout)
+
+	var timedOut bool
+
+	select {
+	case <-waitCh:
+		// All running children reported
+	case <-time.After(timeout):
+		timedOut = true
+		s.logger.Warn("Timeout waiting for children to report",
+			"parent_session", realSessionID)
+	case <-ctx.Done():
+		return nil, ChildrenTasksWaitOutput{
+			Success: false,
+			Error:   "context cancelled while waiting for children to report",
+		}, nil
+	}
+
+	// Build the output with whatever reports we have
+	reports := make(map[string]ChildReportInfo, len(validChildren))
+
+	// Add reports from running children (from collector)
+	collector.mu.Lock()
+	for _, childID := range runningChildren {
+		report := collector.reports[childID]
+		info := ChildReportInfo{Completed: false, Status: "pending"}
+		if report != nil && report.Completed {
+			info.Completed = true
+			info.Status = "completed"
+			info.Report = report.Report
+			if !report.Timestamp.IsZero() {
+				info.Timestamp = report.Timestamp.Format("2006-01-02T15:04:05Z07:00")
+			}
+		}
+		reports[childID] = info
+	}
+	collector.mu.Unlock()
+
+	// Add not-running children to reports
+	for _, childID := range notRunningChildren {
+		reports[childID] = ChildReportInfo{
+			Completed: false,
+			Status:    "not_running",
+		}
+	}
+
+	return nil, ChildrenTasksWaitOutput{
+		Success:  true,
+		Reports:  reports,
+		TimedOut: timedOut,
+		Warnings: warnings,
+	}, nil
+}
+
+func (s *Server) handleChildrenTasksReport(ctx context.Context, req *mcp.CallToolRequest, input ChildrenTasksReportInput) (*mcp.CallToolResult, ChildrenTasksReportOutput, error) {
+	// Validate self_id
+	if input.SelfID == "" {
+		return nil, ChildrenTasksReportOutput{Success: false, Error: "self_id is required"}, nil
+	}
+
+	// Validate report fields
+	if input.Status == "" {
+		return nil, ChildrenTasksReportOutput{Success: false, Error: "status is required"}, nil
+	}
+	if input.Summary == "" {
+		return nil, ChildrenTasksReportOutput{Success: false, Error: "summary is required"}, nil
+	}
+
+	// Serialize the report fields into JSON for internal storage
+	reportJSON, err := json.Marshal(map[string]string{
+		"status":  input.Status,
+		"summary": input.Summary,
+		"details": input.Details,
+	})
+	if err != nil {
+		return nil, ChildrenTasksReportOutput{Success: false, Error: fmt.Sprintf("failed to serialize report: %v", err)}, nil
+	}
+
+	// Resolve the self_id to a real session ID (child)
+	realSessionID := s.resolveSelfIDWithMCP(input.SelfID, req)
+	if realSessionID == "" {
+		return nil, ChildrenTasksReportOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found: the self_id '%s' could not be resolved", input.SelfID),
+		}, nil
+	}
+
+	// Check if session is registered
+	reg := s.getSession(realSessionID)
+	if reg == nil {
+		return nil, ChildrenTasksReportOutput{
+			Success: false,
+			Error:   fmt.Sprintf("session not found or not running: %s", realSessionID),
+		}, nil
+	}
+
+	s.mu.RLock()
+	store := s.store
+	s.mu.RUnlock()
+
+	if store == nil {
+		return nil, ChildrenTasksReportOutput{Success: false, Error: "session store not available"}, nil
+	}
+
+	// Look up child's metadata to find parent
+	childMeta, err := store.GetMetadata(realSessionID)
+	if err != nil {
+		return nil, ChildrenTasksReportOutput{
+			Success: false,
+			Error:   fmt.Sprintf("failed to get session metadata: %v", err),
+		}, nil
+	}
+
+	parentSessionID := childMeta.ParentSessionID
+	if parentSessionID == "" {
+		return nil, ChildrenTasksReportOutput{
+			Success: false,
+			Error:   "this session has no parent session - only child conversations can report back",
+		}, nil
+	}
+
+	// Get-or-create the persistent collector for the parent.
+	// This ensures reports are stored even if the parent hasn't called _wait yet.
+	collector := s.getOrCreateCollector(parentSessionID)
+
+	// Store the report (may also signal a waiting parent)
+	collector.addReport(realSessionID, json.RawMessage(reportJSON))
+
+	s.logger.Info("Child reported to parent",
+		"child_session", realSessionID,
+		"parent_session", parentSessionID)
+
+	return nil, ChildrenTasksReportOutput{
+		Success:         true,
+		ParentSessionID: parentSessionID,
+	}, nil
 }

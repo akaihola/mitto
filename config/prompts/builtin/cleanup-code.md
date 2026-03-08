@@ -1,148 +1,125 @@
 ---
 name: "Cleanup Code"
 description: "Remove dead code, unused imports, and outdated documentation"
+group: "Code Quality"
 backgroundColor: "#C8E6C9"
 ---
 
-Analyze the codebase for cleanup opportunities and propose a prioritized list of changes.
+<investigate_before_answering>
+Read relevant code and search for references before proposing cleanup.
+Read multiple files in parallel. Do not speculate — verify by searching.
+</investigate_before_answering>
 
-**Do not make changes immediately. Propose a plan first and wait for approval.**
+<task>
+Analyze for cleanup opportunities. Propose a plan and wait for approval.
+</task>
 
-### 1. Analyze the Codebase
+## Prerequisites: Check for Mitto MCP Server (Optional)
 
-Investigate the following areas:
+**Note**: Works without Mitto's MCP server, but provides a better experience with it.
 
-**Opportunities for improved modularity:**
+**Optional tools:**
+- `mitto_ui_options_buttons`
+- `mitto_conversation_get_current`
+- `mitto_conversation_new`
+- `mitto_children_tasks_wait`
+- `mitto_children_tasks_report`
+- `mitto_conversation_delete`
 
-- Identify code that is duplicated across modules
-- Find modules that have grown too large and could be split
-- Look for cohesive groups of functions that could be extracted into a new module
+If missing, show instructions for adding Mitto's MCP server at http://127.0.0.1:5757/mcp, then proceed without interactive features.
 
-**Unused Imports:**
+---
 
-Use the project's tools to detect unused imports:
+<instructions>
 
-| Language | Common Tools |
-|----------|--------------|
+### 1. Analyze
+
+**Modularity**: Duplicated code, oversized modules, extractable function groups.
+
+**Unused Imports** (use project tools):
+
+| Language | Tools |
+|----------|-------|
 | Go | `goimports`, `gopls` |
-| JavaScript/TypeScript | ESLint with `no-unused-vars`, IDE refactoring |
-| Python | `autoflake`, `pylint`, IDE refactoring |
-| Rust | `cargo clippy`, compiler warnings |
-| Java | IDE refactoring, `checkstyle` |
+| JS/TS | ESLint `no-unused-vars` |
+| Python | `autoflake`, `pylint` |
+| Rust | `cargo clippy` |
 
-**Dead Code:**
+**Dead Code** (use static analysis):
 
-Use static analysis tools to find unused code:
-
-| Language | Tools for Dead Code Detection |
-|----------|------------------------------|
-| Go | `golangci-lint` (unused, deadcode linters) |
-| JavaScript/TypeScript | ESLint, `ts-prune` |
+| Language | Tools |
+|----------|-------|
+| Go | `golangci-lint` (unused, deadcode) |
+| JS/TS | ESLint, `ts-prune` |
 | Python | `vulture`, `pylint` |
-| Rust | `cargo clippy`, compiler warnings |
-| Java | IDE inspections, `spotbugs` |
+| Rust | `cargo clippy` |
 
-Look for:
+Look for: unexported functions never called, exported functions with no references, unused constants/variables/fields, unused test helpers.
 
-- Private/unexported functions never called within the module
-- Public/exported functions with no references in the codebase
-- Constants and variables defined but never used
-- Class members/struct fields never accessed
-- Test helpers no longer used by any tests
+**Also check**: commented-out code blocks, outdated documentation, obsolete test code.
 
-**Commented-Out Code:**
+### 2. Propose Plan
 
-Search for large blocks of commented-out code that should be removed.
-
-**Outdated Documentation:**
-
-- Find documentation referencing non-existent code,
-  deleted features, or old APIs.
-- Check if existing comments in the code are still relevant or accurate.
-
-**Obsolete Test Code:**
-
-Look for unused test helpers, fixtures, and mock implementations.
-
-### 2. Propose Cleanup Plan
-
-Present a prioritized table of proposed cleanup items:
+<output_format>
 
 | Priority | Category | Location | Description | Risk | Effort |
 |----------|----------|----------|-------------|------|--------|
-| 1 | Dead Code | `path/to/file` | Remove unused function `oldHelper()` | Low | Small |
-| 2 | Imports | `path/to/file` | Remove 3 unused imports | Low | Small |
-| 3 | Documentation | `docs/api.md` | Update outdated API references | Low | Medium |
-| ... | ... | ... | ... | ... | ... |
+| 1 | Dead Code | `path/file` | Remove unused `oldHelper()` | Low | Small |
 
-**Priority levels:**
+Priority: 1=clear dead code, 2=likely unused, 3=needs verification.
+Risk: Low=clearly unused, Medium=verify first, High=public API.
 
-- **1 (High)**: Clear dead code, no risk of breaking anything
-- **2 (Medium)**: Likely unused, low risk
-- **3 (Low)**: Potentially unused, needs careful verification
-
-**Risk levels:**
-
-- **Low**: Clearly unused, safe to remove
-- **Medium**: Appears unused but verify before removing
-- **High**: Public API or widely referenced, needs careful analysis
+</output_format>
 
 ### 3. Wait for Approval
 
-**Using Mitto UI tools (if available):**
+**With Mitto UI**: `mitto_ui_options_buttons` → "Approve all / Approve selected / Investigate / Cancel"
+**Without**: Ask in conversation. Wait for explicit approval.
 
-If the `mitto_ui_options_buttons` tool is available, use it to present the approval options:
+### 4. Execute
 
-```
-Question: "How would you like to proceed with the cleanup plan?"
-Options: ["Approve all", "Approve selected", "Investigate", "Cancel"]
-```
+Per item: make change, verify (linter, tests), report.
 
-If the user selects "Approve selected" or "Investigate", follow up with a text conversation to get the specific item numbers.
+#### Delegating Significant Cleanup to Child Conversations
 
-**Fallback (if Mitto UI tools are not available):**
+For cleanup spanning 3+ files, module restructuring, or multiple parallelizable items, delegate to Mitto child conversations.
 
-Ask the user in the conversation to choose one of these options:
+**Choosing the right ACP server:**
 
-- **Approve all** - proceed with all cleanup items
-- **Approve selected** - specify which items to proceed with (by priority number)
-- **Investigate** - get more details on specific items before deciding
-- **Cancel** - abort without making changes
+1. `mitto_conversation_get_current(self_id: "init")` → get `available_acp_servers`
+2. Match server tags to task:
+   - Well-defined removals → prefer `"coding"`/`"fast"` servers
+   - Complex refactors, ambiguous decisions → prefer `"reasoning"`/`"planning"` servers
+   - No match → current server, then first available
+3. `mitto_conversation_new` with full context, constraints, and reporting directive
+4. `mitto_children_tasks_wait(timeout_seconds: 600)`
+5. Review results, verify changes, run tests
+6. `mitto_conversation_delete` for completed children
 
-**Do not proceed until the user explicitly approves.**
+**Without Mitto tools**: execute directly.
 
-### 4. Execute Approved Changes
-
-For each approved item:
-1. Make the change
-2. Verify nothing breaks (run linter, tests)
-3. Report the result
-
-### 5. Report Summary
-
-After completing approved changes:
+### 5. Summary
 
 ```markdown
 ## Cleanup Summary
-
 ### Changes Made
-- `path/to/file`: Removed unused function `oldHelper()`
-- `path/to/file`: Removed 3 unused imports
-
+- `path/file`: Removed unused function
 ### Verification
-- ✅ All tests passing
-- ✅ Linter checks passing
-- ✅ Code formatted correctly
-
+- ✅ Tests passing / ✅ Linter passing / ✅ Formatted
 ### Skipped Items
-- Item #4: Skipped per user request
+- Item #N: Skipped per user request
 ```
 
-## Rules
+</instructions>
 
-- **Never remove code without proposing first**: Always present the plan and wait for approval
-- **Never remove code without verification**: Always search for references first
-- **Preserve version control history**: Don't worry about "losing" code - it's in history
-- **Run tests after changes**: Catch issues early
-- **Be conservative with public APIs**: They might be used by external code
-- **Update related documentation**: Keep docs in sync with code changes
+<rules>
+- Propose before removing; wait for approval
+- Search for references before declaring code unused
+- Rely on version control for recovery
+- Run tests after changes
+- Be conservative with public APIs
+- Update related docs when removing code
+- For significant cleanup, consider delegating to child conversations
+- Match ACP server to task: coding agents for clear removals, reasoning agents for complex refactors
+- Max 4 parallel child conversations
+</rules>

@@ -76,6 +76,8 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 					ACPCommand: defaultWs.ACPCommand,
 					WorkingDir: req.WorkingDir,
 				}
+				// Ensure the ad-hoc workspace has a UUID for auxiliary sessions
+				workspace.EnsureUUID()
 			}
 		}
 	} else if len(workspaces) == 1 {
@@ -116,9 +118,14 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("Failed to create session", "error", err)
 		}
 		// Broadcast ACP start failure to all clients (use empty session_id since session wasn't created)
-		s.BroadcastACPStartFailed("", err.Error())
+		s.BroadcastACPStartFailed("", err, workspace.ACPCommand)
 		http.Error(w, "Failed to create session", http.StatusInternalServerError)
 		return
+	}
+
+	// Invalidate negative session cache in case this session ID was previously cached as not found
+	if s.negativeSessionCache != nil {
+		s.negativeSessionCache.Remove(bs.GetSessionID())
 	}
 
 	// Determine the ACP server name for the response
@@ -506,7 +513,7 @@ func (s *Server) handleUpdateSession(w http.ResponseWriter, r *http.Request, ses
 						"error", err)
 				}
 				// Broadcast ACP start failure to all clients
-				s.BroadcastACPStartFailed(sessionID, err.Error())
+				s.BroadcastACPStartFailed(sessionID, err, "")
 			} else {
 				if s.logger != nil {
 					s.logger.Info("Resumed ACP session after unarchive",

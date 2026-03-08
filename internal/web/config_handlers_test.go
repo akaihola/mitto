@@ -619,25 +619,33 @@ func TestHandleAdvancedFlags(t *testing.T) {
 		t.Errorf("Content-Type = %q, want %q", contentType, "application/json")
 	}
 
-	// Parse response
-	var flags []struct {
-		Name        string `json:"name"`
-		Label       string `json:"label"`
-		Description string `json:"description"`
-		Default     bool   `json:"default"`
+	// Parse response - now returns an object with flags and configured_defaults
+	var response struct {
+		Flags []struct {
+			Name        string `json:"name"`
+			Label       string `json:"label"`
+			Description string `json:"description"`
+			Default     bool   `json:"default"`
+		} `json:"flags"`
+		ConfiguredDefaults map[string]bool `json:"configured_defaults"`
 	}
-	if err := json.NewDecoder(w.Body).Decode(&flags); err != nil {
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("Failed to decode response: %v", err)
 	}
 
 	// Should have at least the can_do_introspection flag
-	if len(flags) < 1 {
-		t.Fatalf("Expected at least 1 flag, got %d", len(flags))
+	if len(response.Flags) < 1 {
+		t.Fatalf("Expected at least 1 flag, got %d", len(response.Flags))
+	}
+
+	// Configured defaults should be non-nil (even if empty)
+	if response.ConfiguredDefaults == nil {
+		t.Error("configured_defaults should not be nil")
 	}
 
 	// Find can_do_introspection flag
 	found := false
-	for _, flag := range flags {
+	for _, flag := range response.Flags {
 		if flag.Name == "can_do_introspection" {
 			found = true
 			if flag.Label == "" {
@@ -654,6 +662,61 @@ func TestHandleAdvancedFlags(t *testing.T) {
 	}
 	if !found {
 		t.Error("can_do_introspection flag not found in response")
+	}
+}
+
+func TestHandleGetConfig_ETag(t *testing.T) {
+	server := &Server{
+		config: Config{
+			MittoConfig: &config.Config{
+				ACPServers: []config.ACPServer{
+					{Name: "test-server", Command: "test-cmd"},
+				},
+			},
+		},
+		sessionManager: NewSessionManager("", "", false, nil),
+	}
+
+	// First request — should get 200 with ETag
+	req1 := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	w1 := httptest.NewRecorder()
+	server.handleGetConfig(w1, req1)
+
+	if w1.Code != http.StatusOK {
+		t.Fatalf("First request: status = %d, want %d", w1.Code, http.StatusOK)
+	}
+
+	etag := w1.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag header should be set")
+	}
+
+	// Second request with matching If-None-Match — should get 304
+	req2 := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req2.Header.Set("If-None-Match", etag)
+	w2 := httptest.NewRecorder()
+	server.handleGetConfig(w2, req2)
+
+	if w2.Code != http.StatusNotModified {
+		t.Errorf("Second request: status = %d, want %d", w2.Code, http.StatusNotModified)
+	}
+
+	if w2.Body.Len() != 0 {
+		t.Errorf("304 response should have empty body, got %d bytes", w2.Body.Len())
+	}
+
+	// Third request with stale ETag — should get 200
+	req3 := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	req3.Header.Set("If-None-Match", `"stale-etag"`)
+	w3 := httptest.NewRecorder()
+	server.handleGetConfig(w3, req3)
+
+	if w3.Code != http.StatusOK {
+		t.Errorf("Third request: status = %d, want %d", w3.Code, http.StatusOK)
+	}
+
+	if w3.Body.Len() == 0 {
+		t.Error("Full response should have non-empty body")
 	}
 }
 

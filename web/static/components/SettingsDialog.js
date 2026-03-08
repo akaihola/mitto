@@ -9,6 +9,7 @@ import {
   pickFolder,
   openExternalURL,
 } from "../utils/index.js";
+import { setPromptSortMode as savePromptSortMode } from "../utils/storage.js";
 
 // Import shared library functions
 import {
@@ -218,6 +219,9 @@ function ServerEditForm({ server, onSave, onCancel }) {
   const [command, setCommand] = useState(server.command);
   const [type, setType] = useState(server.type || "");
   const [autoApprove, setAutoApprove] = useState(server.auto_approve === true);
+  const [tags, setTags] = useState(
+    server.tags ? server.tags.join(", ") : "",
+  );
   // Environment variables as array of {key, value} for easier editing
   const [envVars, setEnvVars] = useState(() => {
     const env = server.env || {};
@@ -234,7 +238,12 @@ function ServerEditForm({ server, onSave, onCancel }) {
         envObj[key.trim()] = value || "";
       }
     });
-    onSave(name, command, type, autoApprove, envObj);
+    // Parse tags: split by comma, trim whitespace, filter empty strings
+    const parsedTags = tags
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    onSave(name, command, type, autoApprove, envObj, parsedTags);
   };
 
   const addEnvVar = () => {
@@ -287,6 +296,24 @@ function ServerEditForm({ server, onSave, onCancel }) {
         />
         <p class="text-xs text-gray-500 mt-1">
           Servers with the same type share prompts. If empty, name is used.
+        </p>
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1"
+          >Tags
+          <span class="text-xs text-gray-500"
+            >(optional, for categorization)</span
+          ></label
+        >
+        <input
+          type="text"
+          value=${tags}
+          onInput=${(e) => setTags(e.target.value)}
+          placeholder="e.g., coding, fast-model, production"
+          class="w-full px-3 py-2 bg-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        <p class="text-xs text-gray-500 mt-1">
+          Comma-separated tags for categorization
         </p>
       </div>
 
@@ -432,6 +459,7 @@ function PromptEditForm({ prompt, onSave, onCancel, readOnly = false }) {
   const [backgroundColor, setBackgroundColor] = useState(
     prompt.backgroundColor || "",
   );
+  const [group, setGroup] = useState(prompt.group || "");
 
   return html`
     <div class="space-y-3">
@@ -455,6 +483,21 @@ function PromptEditForm({ prompt, onSave, onCancel, readOnly = false }) {
           rows="3"
           disabled=${readOnly}
           class="w-full px-3 py-2 bg-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none ${readOnly
+            ? "opacity-60 cursor-not-allowed"
+            : ""}"
+        />
+      </div>
+      <div>
+        <label class="block text-sm text-gray-400 mb-1"
+          >Group (optional)</label
+        >
+        <input
+          type="text"
+          value=${group}
+          onInput=${(e) => setGroup(e.target.value)}
+          placeholder="e.g., Tasks, Code Quality"
+          disabled=${readOnly}
+          class="w-full px-3 py-2 bg-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${readOnly
             ? "opacity-60 cursor-not-allowed"
             : ""}"
         />
@@ -520,7 +563,7 @@ function PromptEditForm({ prompt, onSave, onCancel, readOnly = false }) {
         ${!readOnly &&
         html`
           <button
-            onClick=${() => onSave(name, text, backgroundColor)}
+            onClick=${() => onSave(name, text, backgroundColor, group)}
             disabled=${!name.trim() || !text.trim()}
             class="px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-500 rounded-lg transition-colors disabled:opacity-50"
           >
@@ -558,16 +601,25 @@ export function SettingsDialog({
     () => [...acpServers].sort((a, b) => a.name.localeCompare(b.name)),
     [acpServers],
   );
-  // Sorted workspaces for display (alphabetical by display name)
-  const sortedWorkspaces = useMemo(
-    () =>
-      [...workspaces].sort((a, b) => {
-        const nameA = a.name || getBasename(a.working_dir);
-        const nameB = b.name || getBasename(b.working_dir);
-        return nameA.localeCompare(nameB);
-      }),
-    [workspaces],
-  );
+  // Group workspaces by display name (alphabetical), with ACP servers sorted within each group
+  const groupedWorkspaces = useMemo(() => {
+    const groups = new Map();
+    workspaces.forEach((ws) => {
+      const displayName = ws.name || getBasename(ws.working_dir);
+      if (!groups.has(displayName)) {
+        groups.set(displayName, []);
+      }
+      groups.get(displayName).push(ws);
+    });
+    // Sort workspaces within each group by ACP server name
+    groups.forEach((wsArray) => {
+      wsArray.sort((a, b) => (a.acp_server || "").localeCompare(b.acp_server || ""));
+    });
+    // Convert to array sorted by display name
+    return Array.from(groups.entries())
+      .sort(([nameA], [nameB]) => nameA.localeCompare(nameB))
+      .map(([displayName, wsArray]) => ({ displayName, workspaces: wsArray }));
+  }, [workspaces]);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -576,6 +628,9 @@ export function SettingsDialog({
   const [externalEnabled, setExternalEnabled] = useState(false); // Is external listener currently running
   const [hookUpCommand, setHookUpCommand] = useState("");
   const [hookDownCommand, setHookDownCommand] = useState("");
+
+  // Access log setting (enabled by default)
+  const [accessLogEnabled, setAccessLogEnabled] = useState(true);
 
   // Stored sessions for checking workspace usage
   const [storedSessions, setStoredSessions] = useState([]);
@@ -601,6 +656,7 @@ export function SettingsDialog({
   const [newServerName, setNewServerName] = useState("");
   const [newServerCommand, setNewServerCommand] = useState("");
   const [newServerType, setNewServerType] = useState("");
+  const [newServerTags, setNewServerTags] = useState("");
 
   const [editingServer, setEditingServer] = useState(null);
 
@@ -621,6 +677,7 @@ export function SettingsDialog({
   const [newPromptName, setNewPromptName] = useState("");
   const [newPromptText, setNewPromptText] = useState("");
   const [newPromptColor, setNewPromptColor] = useState("");
+  const [newPromptGroup, setNewPromptGroup] = useState("");
   const [editingPrompt, setEditingPrompt] = useState(null);
 
   // Prompt drag-and-drop state
@@ -648,6 +705,9 @@ export function SettingsDialog({
   // Archive retention period setting
   const [archiveRetentionPeriod, setArchiveRetentionPeriod] = useState("never");
 
+  // Auto-archive inactive period setting
+  const [autoArchiveInactiveAfter, setAutoArchiveInactiveAfter] = useState("");
+
   // Follow-up suggestions settings (advanced) - enabled by default
   const [actionButtonsEnabled, setActionButtonsEnabled] = useState(true);
 
@@ -660,6 +720,11 @@ export function SettingsDialog({
 
   // Input font family setting (web UI)
   const [inputFontFamily, setInputFontFamily] = useState("system");
+
+  // Send key mode setting (web UI) - default: "enter"
+  // "enter" = Enter to send, Shift+Enter for new line
+  // "ctrl-enter" = Ctrl/Cmd+Enter to send, Enter for new line
+  const [sendKeyMode, setSendKeyMode] = useState("enter");
 
   // Conversation cycling mode setting (web UI) - default: "all"
   const [conversationCyclingMode, setConversationCyclingMode] = useState(
@@ -681,6 +746,46 @@ export function SettingsDialog({
     return true;
   });
 
+  // Follow system reduced motion setting (client-side, stored in localStorage)
+  const [followSystemReducedMotion, setFollowSystemReducedMotion] = useState(
+    () => {
+      if (typeof localStorage !== "undefined") {
+        const saved = localStorage.getItem(
+          "mitto-follow-system-reduced-motion",
+        );
+        return saved === null ? true : saved === "true";
+      }
+      return true;
+    },
+  );
+
+  // Reduce animations setting (client-side, stored in localStorage)
+  const [reduceAnimations, setReduceAnimationsState] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      // If following system, check OS preference
+      const followSystem = localStorage.getItem(
+        "mitto-follow-system-reduced-motion",
+      );
+      if (followSystem === null || followSystem === "true") {
+        if (typeof window !== "undefined" && window.matchMedia) {
+          return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        }
+      }
+      const saved = localStorage.getItem("mitto-reduce-animations");
+      if (saved !== null) return saved === "true";
+    }
+    return false;
+  });
+
+  // Prompt sort mode setting (client-side, stored in localStorage and server)
+  const [promptSortMode, setPromptSortMode] = useState(() => {
+    if (typeof localStorage !== "undefined") {
+      const saved = localStorage.getItem("mitto_prompt_sort_mode");
+      return saved === "color" ? "color" : "alphabetical";
+    }
+    return "alphabetical";
+  });
+
   // Check if running in the native macOS app
   const isMacApp = typeof window.mittoPickFolder === "function";
 
@@ -694,6 +799,51 @@ export function SettingsDialog({
         detail: { enabled },
       }),
     );
+  };
+
+  // Handle follow system reduced motion toggle
+  const handleFollowSystemReducedMotionChange = (enabled) => {
+    setFollowSystemReducedMotion(enabled);
+    localStorage.setItem(
+      "mitto-follow-system-reduced-motion",
+      String(enabled),
+    );
+    // When enabling, sync with OS preference immediately
+    let newReduceAnimations = reduceAnimations;
+    if (enabled && typeof window !== "undefined" && window.matchMedia) {
+      newReduceAnimations = window.matchMedia(
+        "(prefers-reduced-motion: reduce)",
+      ).matches;
+      setReduceAnimationsState(newReduceAnimations);
+    }
+    window.dispatchEvent(
+      new CustomEvent("mitto-reduce-animations-changed", {
+        detail: {
+          followSystem: enabled,
+          reduceAnimations: newReduceAnimations,
+        },
+      }),
+    );
+  };
+
+  // Handle explicit reduce animations toggle
+  const handleReduceAnimationsChange = (enabled) => {
+    // When user manually toggles, disable follow system
+    setFollowSystemReducedMotion(false);
+    setReduceAnimationsState(enabled);
+    localStorage.setItem("mitto-follow-system-reduced-motion", "false");
+    localStorage.setItem("mitto-reduce-animations", String(enabled));
+    window.dispatchEvent(
+      new CustomEvent("mitto-reduce-animations-changed", {
+        detail: { followSystem: false, reduceAnimations: enabled },
+      }),
+    );
+  };
+
+  // Handle prompt sort mode change
+  const handlePromptSortModeChange = (mode) => {
+    setPromptSortMode(mode);
+    savePromptSortMode(mode); // This saves to localStorage and server
   };
 
   // Load configuration when dialog opens
@@ -941,6 +1091,9 @@ export function SettingsDialog({
       setHookUpCommand(config.web?.hooks?.up?.command || "");
       setHookDownCommand(config.web?.hooks?.down?.command || "");
 
+      // Load access log setting (enabled by default)
+      setAccessLogEnabled(config.web?.access_log?.enabled !== false);
+
       // Load prompts from top-level (not under web)
       setPrompts(config.prompts || []);
 
@@ -991,6 +1144,11 @@ export function SettingsDialog({
         config.session?.archive_retention_period || "never",
       );
 
+      // Load auto-archive inactive period setting (default to "" - disabled)
+      setAutoArchiveInactiveAfter(
+        config.session?.auto_archive_inactive_after || "",
+      );
+
       // Load follow-up suggestions settings (advanced) - enabled by default
       setActionButtonsEnabled(
         config.conversations?.action_buttons?.enabled !== false,
@@ -1003,6 +1161,9 @@ export function SettingsDialog({
 
       // Load input font family setting (web UI) - default to "system"
       setInputFontFamily(config.ui?.web?.input_font_family || "system");
+
+      // Load send key mode setting (web UI) - default to "enter"
+      setSendKeyMode(config.ui?.web?.send_key_mode || "enter");
 
       // Load single expanded group (accordion mode) setting (web UI) - default to false
       const accordionEnabled = config.ui?.web?.single_expanded_group === true;
@@ -1099,6 +1260,11 @@ export function SettingsDialog({
           : null,
       };
 
+      // Add access log setting
+      webConfig.access_log = {
+        enabled: accessLogEnabled,
+      };
+
       // Add hooks if configured
       if (hookUpCommand.trim() || hookDownCommand.trim()) {
         webConfig.hooks = {};
@@ -1119,6 +1285,7 @@ export function SettingsDialog({
         // Web-specific UI settings
         web: {
           input_font_family: inputFontFamily,
+          send_key_mode: sendKeyMode,
           conversation_cycling_mode: conversationCyclingMode,
           single_expanded_group: singleExpandedGroup,
         },
@@ -1159,9 +1326,10 @@ export function SettingsDialog({
         }),
       };
 
-      // Build session config with archive retention period
+      // Build session config with archive retention period and auto-archive inactive period
       const sessionConfig = {
         archive_retention_period: archiveRetentionPeriod,
+        auto_archive_inactive_after: autoArchiveInactiveAfter,
       };
 
       // Filter prompts to only save settings-based prompts (not file-based ones)
@@ -1180,6 +1348,7 @@ export function SettingsDialog({
           source: srv.source || "settings", // Default to settings if not specified
           auto_approve: srv.auto_approve || false, // Include auto-approve setting
           env: srv.env || undefined, // Include env vars if present
+          tags: srv.tags && srv.tags.length > 0 ? srv.tags : undefined, // Include tags if present
         };
         // Only include type if specified (otherwise name is used as type)
         if (srv.type) {
@@ -1582,16 +1751,25 @@ export function SettingsDialog({
     if (newServerType.trim()) {
       newServer.type = newServerType.trim();
     }
+    // Parse and include tags if specified
+    const parsedNewTags = newServerTags
+      .split(",")
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    if (parsedNewTags.length > 0) {
+      newServer.tags = parsedNewTags;
+    }
 
     setAcpServers([...acpServers, newServer]);
     setNewServerName("");
     setNewServerCommand("");
     setNewServerType("");
+    setNewServerTags("");
     setShowAddServer(false);
     setError("");
   };
 
-  const updateServer = (oldName, newName, newCommand, newType, autoApprove, env) => {
+  const updateServer = (oldName, newName, newCommand, newType, autoApprove, env, tags) => {
     if (!newName.trim() || !newCommand.trim()) {
       setError("Server name and command cannot be empty");
       return;
@@ -1617,6 +1795,7 @@ export function SettingsDialog({
           source: s.source, // Preserve source (rcfile or settings)
           auto_approve: autoApprove || undefined, // undefined to omit if false
           env: env && Object.keys(env).length > 0 ? env : undefined, // undefined to omit if empty
+          tags: tags && tags.length > 0 ? tags : undefined, // undefined to omit if empty
         };
         // Only include type if specified (otherwise name is used as type)
         if (newType && newType.trim()) {
@@ -1720,6 +1899,16 @@ export function SettingsDialog({
       duplicatedServer.type = server.type;
     }
 
+    // Copy environment variables if present (shallow copy to avoid shared references)
+    if (server.env && Object.keys(server.env).length > 0) {
+      duplicatedServer.env = { ...server.env };
+    }
+
+    // Copy auto_approve if enabled
+    if (server.auto_approve) {
+      duplicatedServer.auto_approve = server.auto_approve;
+    }
+
     setAcpServers([...acpServers, duplicatedServer]);
     setError("");
   };
@@ -1735,7 +1924,7 @@ export function SettingsDialog({
     { id: "workspaces", label: "Workspaces", icon: FolderIcon },
     { id: "prompts", label: "Prompts", icon: LightningIcon },
     { id: "runners", label: "Runners", icon: LockIcon },
-    { id: "permissions", label: "Permissions", icon: ShieldIcon },
+    { id: "permissions", label: "Conversations", icon: ShieldIcon },
     { id: "web", label: "Web", icon: GlobeIcon },
     { id: "ui", label: "UI", icon: SlidersIcon },
   ];
@@ -2035,124 +2224,133 @@ export function SettingsDialog({
                             </div>
                           `
                         : html`
-                            <div class="space-y-2">
-                              ${sortedWorkspaces.map((ws) => {
-                                const wsKey = getWorkspaceKey(ws);
-                                const isEditing = editingWorkspace === wsKey;
+                            <div class="space-y-3">
+                              ${groupedWorkspaces.map(({ displayName: groupName, workspaces: wsGroup }) => {
+                                const isGrouped = wsGroup.length > 1;
                                 return html`
-                                  <div
-                                    key=${wsKey}
-                                    class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50 ${isEditing
-                                      ? ""
-                                      : "hover:bg-slate-700/30"} transition-colors group"
-                                  >
-                                    ${isEditing
-                                      ? html`
-                                          <!-- Editing mode: show name/path info and edit form -->
-                                          <div class="flex items-center gap-3">
-                                            <${WorkspaceBadge}
-                                              path=${ws.working_dir}
-                                              customColor=${ws.color}
-                                              customCode=${ws.code}
-                                              customName=${ws.name}
-                                              size="sm"
-                                            />
-                                            <div class="flex-1 min-w-0">
-                                              <div
-                                                class="font-medium text-sm flex items-center gap-2"
-                                              >
-                                                ${ws.name ||
-                                                getBasename(ws.working_dir)}
-                                                <span
-                                                  class="px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded text-xs"
-                                                >
-                                                  ${ws.acp_server}
-                                                </span>
-                                              </div>
-                                              <div
-                                                class="text-xs text-gray-500 truncate"
-                                                title=${ws.working_dir}
-                                              >
-                                                ${ws.working_dir}
-                                              </div>
-                                            </div>
-                                          </div>
-                                          <${WorkspaceEditForm}
-                                            workspace=${ws}
-                                            acpServers=${acpServers}
-                                            supportedRunners=${supportedRunners}
-                                            getWorkspaceVisualInfo=${getWorkspaceVisualInfo}
-                                            getBasename=${getBasename}
-                                            onSave=${(updates) =>
-                                              updateWorkspace(wsKey, updates)}
-                                            onCancel=${() =>
-                                              setEditingWorkspace(null)}
-                                          />
-                                        `
-                                      : html`
-                                          <!-- Collapsed view: show info and action buttons -->
-                                          <div class="flex items-center gap-3">
-                                            <${WorkspaceBadge}
-                                              path=${ws.working_dir}
-                                              customColor=${ws.color}
-                                              customCode=${ws.code}
-                                              customName=${ws.name}
-                                              size="sm"
-                                            />
-                                            <div class="flex-1 min-w-0">
-                                              <div
-                                                class="font-medium text-sm flex items-center gap-2"
-                                              >
-                                                ${ws.name ||
-                                                getBasename(ws.working_dir)}
-                                                <span
-                                                  class="px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded text-xs"
-                                                  title="ACP Server"
-                                                >
-                                                  ${ws.acp_server}
-                                                </span>
-                                              </div>
-                                              <div
-                                                class="text-xs text-gray-500 truncate"
-                                                title=${ws.working_dir}
-                                              >
-                                                ${ws.working_dir}
-                                              </div>
-                                            </div>
-                                            <!-- Action buttons (visible on hover) -->
-                                            ${canDuplicateWorkspace(ws) &&
-                                            html`
-                                              <button
-                                                onClick=${() =>
-                                                  duplicateWorkspace(wsKey)}
-                                                class="p-1.5 text-gray-500 hover:text-green-400 hover:bg-green-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                                                title="Duplicate workspace"
-                                              >
-                                                <${DuplicateIcon}
-                                                  className="w-4 h-4"
+                                  <div key=${groupName} class="space-y-1">
+                                    <div class="px-2 py-1 text-xs font-medium text-gray-400 flex items-center gap-2">
+                                      <span class="truncate">${groupName}</span>
+                                      <span class="text-gray-500">(${wsGroup.length})</span>
+                                    </div>
+                                    ${wsGroup.map((ws) => {
+                                      const wsKey = getWorkspaceKey(ws);
+                                      const isEditing = editingWorkspace === wsKey;
+                                      return html`
+                                        <div
+                                          key=${wsKey}
+                                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50 ${isEditing
+                                            ? ""
+                                            : "hover:bg-slate-700/30"} transition-colors group ml-4"
+                                        >
+                                          ${isEditing
+                                            ? html`
+                                                <!-- Editing mode: show name/path info and edit form -->
+                                                <div class="flex items-center gap-3">
+                                                  <${WorkspaceBadge}
+                                                    path=${ws.working_dir}
+                                                    customColor=${ws.color}
+                                                    customCode=${ws.code}
+                                                    customName=${ws.name}
+                                                    size="sm"
+                                                  />
+                                                  <div class="flex-1 min-w-0">
+                                                    <div
+                                                      class="font-medium text-sm flex items-center gap-2"
+                                                    >
+                                                      ${ws.name ||
+                                                      getBasename(ws.working_dir)}
+                                                      <span
+                                                        class="px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded text-xs"
+                                                      >
+                                                        ${ws.acp_server}
+                                                      </span>
+                                                    </div>
+                                                    <div
+                                                      class="text-xs text-gray-500 truncate"
+                                                      title=${ws.working_dir}
+                                                    >
+                                                      ${ws.working_dir}
+                                                    </div>
+                                                  </div>
+                                                </div>
+                                                <${WorkspaceEditForm}
+                                                  workspace=${ws}
+                                                  acpServers=${acpServers}
+                                                  supportedRunners=${supportedRunners}
+                                                  getWorkspaceVisualInfo=${getWorkspaceVisualInfo}
+                                                  getBasename=${getBasename}
+                                                  onSave=${(updates) =>
+                                                    updateWorkspace(wsKey, updates)}
+                                                  onCancel=${() =>
+                                                    setEditingWorkspace(null)}
                                                 />
-                                              </button>
-                                            `}
-                                            <button
-                                              onClick=${() =>
-                                                setEditingWorkspace(wsKey)}
-                                              class="p-1.5 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                                              title="Edit workspace"
-                                            >
-                                              <${EditIcon} className="w-4 h-4" />
-                                            </button>
-                                            <button
-                                              onClick=${() =>
-                                                removeWorkspace(wsKey)}
-                                              class="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
-                                              title="Remove workspace"
-                                            >
-                                              <${TrashIcon}
-                                                className="w-4 h-4"
-                                              />
-                                            </button>
-                                          </div>
-                                        `}
+                                              `
+                                            : html`
+                                                <!-- Collapsed view: show info and action buttons -->
+                                                <div class="flex items-center gap-3">
+                                                  <${WorkspaceBadge}
+                                                    path=${ws.working_dir}
+                                                    customColor=${ws.color}
+                                                    customCode=${ws.code}
+                                                    customName=${ws.name}
+                                                    size="sm"
+                                                  />
+                                                  <div class="flex-1 min-w-0">
+                                                    <div
+                                                      class="font-medium text-sm flex items-center gap-2"
+                                                    >
+                                                      <span
+                                                        class="px-1.5 py-0.5 bg-purple-500/20 text-purple-400 rounded text-xs"
+                                                        title="ACP Server"
+                                                      >
+                                                        ${ws.acp_server}
+                                                      </span>
+                                                    </div>
+                                                    <div
+                                                      class="text-xs text-gray-500 truncate"
+                                                      title=${ws.working_dir}
+                                                    >
+                                                      ${ws.working_dir}
+                                                    </div>
+                                                  </div>
+                                                  <!-- Action buttons (visible on hover) -->
+                                                  ${canDuplicateWorkspace(ws) &&
+                                                  html`
+                                                    <button
+                                                      onClick=${() =>
+                                                        duplicateWorkspace(wsKey)}
+                                                      class="p-1.5 text-gray-500 hover:text-green-400 hover:bg-green-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                                      title="Duplicate workspace"
+                                                    >
+                                                      <${DuplicateIcon}
+                                                        className="w-4 h-4"
+                                                      />
+                                                    </button>
+                                                  `}
+                                                  <button
+                                                    onClick=${() =>
+                                                      setEditingWorkspace(wsKey)}
+                                                    class="p-1.5 text-gray-500 hover:text-blue-400 hover:bg-blue-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                                    title="Edit workspace"
+                                                  >
+                                                    <${EditIcon} className="w-4 h-4" />
+                                                  </button>
+                                                  <button
+                                                    onClick=${() =>
+                                                      removeWorkspace(wsKey)}
+                                                    class="p-1.5 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
+                                                    title="Remove workspace"
+                                                  >
+                                                    <${TrashIcon}
+                                                      className="w-4 h-4"
+                                                    />
+                                                  </button>
+                                                </div>
+                                              `}
+                                        </div>
+                                      `;
+                                    })}
                                   </div>
                                 `;
                               })}
@@ -2243,6 +2441,25 @@ export function SettingsDialog({
                               empty, name is used.
                             </p>
                           </div>
+                          <div>
+                            <label class="block text-sm text-gray-400 mb-1"
+                              >Tags
+                              <span class="text-xs text-gray-500"
+                                >(optional)</span
+                              ></label
+                            >
+                            <input
+                              type="text"
+                              value=${newServerTags}
+                              onInput=${(e) =>
+                                setNewServerTags(e.target.value)}
+                              placeholder="e.g., coding, fast-model, production"
+                              class="w-full px-3 py-2 bg-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                            <p class="text-xs text-gray-500 mt-1">
+                              Comma-separated tags for categorization
+                            </p>
+                          </div>
                           ${error &&
                           html`
                             <div
@@ -2258,6 +2475,7 @@ export function SettingsDialog({
                                 setNewServerName("");
                                 setNewServerCommand("");
                                 setNewServerType("");
+                                setNewServerTags("");
                                 setError("");
                               }}
                               class="px-3 py-1.5 text-sm hover:bg-slate-700 rounded-lg transition-colors"
@@ -2303,7 +2521,7 @@ export function SettingsDialog({
                                       ? html`
                                           <${ServerEditForm}
                                             server=${srv}
-                                            onSave=${(name, cmd, type, autoApprove, env) =>
+                                            onSave=${(name, cmd, type, autoApprove, env, tags) =>
                                               updateServer(
                                                 srv.name,
                                                 name,
@@ -2311,6 +2529,7 @@ export function SettingsDialog({
                                                 type,
                                                 autoApprove,
                                                 env,
+                                                tags,
                                               )}
                                             onCancel=${() =>
                                               setEditingServer(null)}
@@ -2332,6 +2551,19 @@ export function SettingsDialog({
                                                     ${srv.type}
                                                   </span>
                                                 `}
+                                                ${srv.tags &&
+                                                srv.tags.length > 0 &&
+                                                srv.tags.map(
+                                                  (tag) => html`
+                                                    <span
+                                                      key=${tag}
+                                                      class="px-1.5 py-0.5 bg-blue-500/20 text-blue-400 rounded text-xs"
+                                                      title="Tag"
+                                                    >
+                                                      ${tag}
+                                                    </span>
+                                                  `,
+                                                )}
                                                 ${isRCFile &&
                                                 html`
                                                   <span
@@ -2464,6 +2696,18 @@ export function SettingsDialog({
                           </div>
                           <div>
                             <label class="block text-sm text-gray-400 mb-1"
+                              >Group (optional)</label
+                            >
+                            <input
+                              type="text"
+                              value=${newPromptGroup}
+                              onInput=${(e) => setNewPromptGroup(e.target.value)}
+                              placeholder="e.g., Tasks, Code Quality"
+                              class="w-full px-3 py-2 bg-slate-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-sm text-gray-400 mb-1"
                               >Background Color (optional)</label
                             >
                             <div class="flex items-center gap-2">
@@ -2515,6 +2759,7 @@ export function SettingsDialog({
                                 setNewPromptName("");
                                 setNewPromptText("");
                                 setNewPromptColor("");
+                                setNewPromptGroup("");
                               }}
                               class="px-3 py-1.5 text-sm hover:bg-slate-700 rounded-lg transition-colors"
                             >
@@ -2533,10 +2778,14 @@ export function SettingsDialog({
                                   if (newPromptColor) {
                                     newPrompt.backgroundColor = newPromptColor;
                                   }
+                                  if (newPromptGroup.trim()) {
+                                    newPrompt.group = newPromptGroup.trim();
+                                  }
                                   setPrompts([...prompts, newPrompt]);
                                   setNewPromptName("");
                                   setNewPromptText("");
                                   setNewPromptColor("");
+                                  setNewPromptGroup("");
                                   setShowAddPrompt(false);
                                 }
                               }}
@@ -2578,7 +2827,7 @@ export function SettingsDialog({
                                           prompt=${prompt}
                                           readOnly=${prompt.source === "file" ||
                                           prompt.source === "workspace"}
-                                          onSave=${(name, text, bgColor) => {
+                                          onSave=${(name, text, bgColor, group) => {
                                             const updated = [...prompts];
                                             updated[originalIndex] = {
                                               ...prompts[originalIndex],
@@ -2588,6 +2837,11 @@ export function SettingsDialog({
                                             if (bgColor) {
                                               updated[originalIndex]
                                                 .backgroundColor = bgColor;
+                                            }
+                                            if (group && group.trim()) {
+                                              updated[originalIndex].group = group.trim();
+                                            } else {
+                                              delete updated[originalIndex].group;
                                             }
                                             setPrompts(updated);
                                             setEditingPrompt(null);
@@ -3529,6 +3783,125 @@ export function SettingsDialog({
                           </div>
                         `}
                       </div>
+
+                      <!-- Archive Settings -->
+                      <div class="space-y-3">
+                        <h4 class="text-sm font-medium text-gray-300">
+                          Archive Settings
+                        </h4>
+                        <div
+                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
+                        >
+                          <div class="flex items-center justify-between">
+                            <div>
+                              <div class="font-medium text-sm">
+                                Auto-archive inactive conversations
+                              </div>
+                              <div class="text-xs text-gray-500">
+                                Automatically archive conversations after the
+                                specified period of inactivity
+                              </div>
+                            </div>
+                            <select
+                              value=${autoArchiveInactiveAfter}
+                              onChange=${(e) =>
+                                setAutoArchiveInactiveAfter(e.target.value)}
+                              class="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm focus:ring-blue-500 focus:border-blue-500"
+                            >
+                              <option value="">Disabled</option>
+                              <option value="1d">After 1 day</option>
+                              <option value="1w">After 1 week</option>
+                              <option value="1m">After 1 month</option>
+                              <option value="3m">After 3 months</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div
+                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
+                        >
+                          <div class="flex items-center justify-between">
+                            <div>
+                              <div class="font-medium text-sm">
+                                Auto-delete archived conversations
+                              </div>
+                              <div class="text-xs text-gray-500">
+                                Automatically delete archived conversations
+                                after the specified period
+                              </div>
+                            </div>
+                            <select
+                              value=${archiveRetentionPeriod}
+                              onChange=${(e) =>
+                                setArchiveRetentionPeriod(e.target.value)}
+                              class="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm focus:ring-blue-500 focus:border-blue-500"
+                            >
+                              <option value="never">Never</option>
+                              <option value="1d">After 1 day</option>
+                              <option value="1w">After 1 week</option>
+                              <option value="1m">After 1 month</option>
+                              <option value="3m">After 3 months</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+
+                      <!-- Default Flags for New Conversations -->
+                      ${availableFlags.length > 0 &&
+                      html`
+                        <div class="space-y-3">
+                          <h4 class="text-sm font-medium text-gray-300">
+                            Default Flags for New Conversations
+                          </h4>
+                          <p class="text-xs text-gray-500">
+                            These flags will be enabled by default when creating
+                            new conversations.
+                          </p>
+                          <div
+                            class="bg-slate-700/20 rounded-lg border border-slate-600/50 overflow-hidden"
+                          >
+                            <table class="w-full text-sm">
+                              <tbody>
+                                ${availableFlags.map(
+                                  (flag) => html`
+                                    <tr
+                                      key=${flag.name}
+                                      class="border-b border-slate-600/30 last:border-b-0 hover:bg-slate-700/30 transition-colors"
+                                    >
+                                      <td class="p-3 w-10">
+                                        <input
+                                          type="checkbox"
+                                          checked=${defaultFlags[flag.name] ||
+                                          false}
+                                          onChange=${(e) => {
+                                            const newFlags = {
+                                              ...defaultFlags,
+                                            };
+                                            if (e.target.checked) {
+                                              newFlags[flag.name] = true;
+                                            } else {
+                                              delete newFlags[flag.name];
+                                            }
+                                            setDefaultFlags(newFlags);
+                                          }}
+                                          class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
+                                        />
+                                      </td>
+                                      <td class="p-3">
+                                        <div class="font-medium">
+                                          ${flag.label}
+                                        </div>
+                                        <div class="text-xs text-gray-500">
+                                          ${flag.description}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  `,
+                                )}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      `}
                     </div>
                   `}
 
@@ -3679,6 +4052,35 @@ export function SettingsDialog({
                           </div>
                         `}
                       </div>
+
+                      <!-- Access Log Section -->
+                      <div class="space-y-3">
+                        <h4 class="text-sm font-medium text-gray-300">
+                          Access Log
+                        </h4>
+
+                        <label
+                          class="flex items-center gap-3 p-4 bg-slate-700/20 rounded-lg border border-slate-600/50 cursor-pointer hover:bg-slate-700/30 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked=${accessLogEnabled}
+                            onChange=${(e) =>
+                              setAccessLogEnabled(e.target.checked)}
+                            class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                          />
+                          <div>
+                            <div class="font-medium text-sm">
+                              Enable Access Log
+                            </div>
+                            <div class="text-xs text-gray-500">
+                              Log security-relevant events (login attempts,
+                              unauthorized access, external requests) to a
+                              rotating log file
+                            </div>
+                          </div>
+                        </label>
+                      </div>
                     </div>
                   `}
 
@@ -3711,6 +4113,77 @@ export function SettingsDialog({
                             </div>
                           </div>
                         </label>
+                        <label
+                          class="flex items-center gap-3 p-3 bg-slate-700/20 rounded-lg border border-slate-600/50 cursor-pointer hover:bg-slate-700/30 transition-colors"
+                        >
+                          <input
+                            type="checkbox"
+                            checked=${followSystemReducedMotion}
+                            onChange=${(e) =>
+                              handleFollowSystemReducedMotionChange(
+                                e.target.checked,
+                              )}
+                            class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+                          />
+                          <div>
+                            <div class="font-medium text-sm">
+                              Follow system reduced motion
+                            </div>
+                            <div class="text-xs text-gray-500">
+                              Automatically reduce animations based on your
+                              system accessibility preferences
+                            </div>
+                          </div>
+                        </label>
+                        <label
+                          class="flex items-center gap-3 p-3 bg-slate-700/20 rounded-lg border border-slate-600/50 cursor-pointer hover:bg-slate-700/30 transition-colors ${followSystemReducedMotion
+                            ? "opacity-50"
+                            : ""}"
+                        >
+                          <input
+                            type="checkbox"
+                            checked=${reduceAnimations}
+                            onChange=${(e) =>
+                              handleReduceAnimationsChange(e.target.checked)}
+                            disabled=${followSystemReducedMotion}
+                            class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 ${followSystemReducedMotion
+                              ? "cursor-not-allowed"
+                              : ""}"
+                          />
+                          <div>
+                            <div class="font-medium text-sm">
+                              Reduce animations
+                            </div>
+                            <div class="text-xs text-gray-500">
+                              ${followSystemReducedMotion
+                                ? "Controlled by system preference"
+                                : "Replace pulsing and blinking animations with static indicators"}
+                            </div>
+                          </div>
+                        </label>
+                        <div
+                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
+                        >
+                          <div class="flex items-center justify-between">
+                            <div>
+                              <div class="font-medium text-sm">
+                                Prompt sorting
+                              </div>
+                              <div class="text-xs text-gray-500">
+                                How to sort prompts in the dropdown menu
+                              </div>
+                            </div>
+                            <select
+                              value=${promptSortMode}
+                              onChange=${(e) =>
+                                handlePromptSortModeChange(e.target.value)}
+                              class="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm focus:ring-blue-500 focus:border-blue-500"
+                            >
+                              <option value="alphabetical">Alphabetical</option>
+                              <option value="color">By Color</option>
+                            </select>
+                          </div>
+                        </div>
                         <div
                           class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
                         >
@@ -3743,6 +4216,38 @@ export function SettingsDialog({
                               <option value="sf-mono">SF Mono</option>
                               <option value="cascadia-code">
                                 Cascadia Code
+                              </option>
+                            </select>
+                          </div>
+                        </div>
+                        <div
+                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
+                        >
+                          <div class="flex items-center justify-between">
+                            <div>
+                              <div class="font-medium text-sm">
+                                Send message shortcut
+                              </div>
+                              <div class="text-xs text-gray-500">
+                                Key combination to send messages
+                              </div>
+                            </div>
+                            <select
+                              value=${sendKeyMode}
+                              onChange=${(e) => setSendKeyMode(e.target.value)}
+                              class="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm focus:ring-blue-500 focus:border-blue-500"
+                            >
+                              <option value="enter">
+                                Enter to send (${navigator.platform?.includes("Mac")
+                                  ? "⌘"
+                                  : "Ctrl"}+Enter to queue)
+                              </option>
+                              <option value="ctrl-enter">
+                                ${navigator.platform?.includes("Mac")
+                                  ? "⌘"
+                                  : "Ctrl"}+Enter to send (${navigator.platform?.includes("Mac")
+                                  ? "⌘⇧"
+                                  : "Ctrl+Shift"}+Enter to queue)
                               </option>
                             </select>
                           </div>
@@ -3857,40 +4362,6 @@ export function SettingsDialog({
                             </div>
                           </label>
                         `}
-                      </div>
-
-                      <!-- Archive Settings -->
-                      <div class="space-y-3">
-                        <h4 class="text-sm font-medium text-gray-300">
-                          Archive Settings
-                        </h4>
-                        <div
-                          class="p-3 bg-slate-700/20 rounded-lg border border-slate-600/50"
-                        >
-                          <div class="flex items-center justify-between">
-                            <div>
-                              <div class="font-medium text-sm">
-                                Auto-delete archived conversations
-                              </div>
-                              <div class="text-xs text-gray-500">
-                                Automatically delete archived conversations
-                                after the specified period
-                              </div>
-                            </div>
-                            <select
-                              value=${archiveRetentionPeriod}
-                              onChange=${(e) =>
-                                setArchiveRetentionPeriod(e.target.value)}
-                              class="bg-slate-700 border border-slate-600 rounded px-3 py-1.5 text-sm focus:ring-blue-500 focus:border-blue-500"
-                            >
-                              <option value="never">Never</option>
-                              <option value="1d">After 1 day</option>
-                              <option value="1w">After 1 week</option>
-                              <option value="1m">After 1 month</option>
-                              <option value="3m">After 3 months</option>
-                            </select>
-                          </div>
-                        </div>
                       </div>
 
                       <!-- macOS-specific settings -->
@@ -4088,64 +4559,6 @@ export function SettingsDialog({
                           </div>
                         </label>
                       </div>
-
-                      <!-- Default Flags for New Conversations -->
-                      ${availableFlags.length > 0 &&
-                      html`
-                        <div class="space-y-3 pt-4 border-t border-slate-700/50">
-                          <h4 class="text-sm font-medium text-gray-300">
-                            Default Flags for New Conversations
-                          </h4>
-                          <p class="text-xs text-gray-500">
-                            These flags will be enabled by default when creating
-                            new conversations.
-                          </p>
-                          <div
-                            class="bg-slate-700/20 rounded-lg border border-slate-600/50 overflow-hidden"
-                          >
-                            <table class="w-full text-sm">
-                              <tbody>
-                                ${availableFlags.map(
-                                  (flag) => html`
-                                    <tr
-                                      key=${flag.name}
-                                      class="border-b border-slate-600/30 last:border-b-0 hover:bg-slate-700/30 transition-colors"
-                                    >
-                                      <td class="p-3 w-10">
-                                        <input
-                                          type="checkbox"
-                                          checked=${defaultFlags[flag.name] ||
-                                          false}
-                                          onChange=${(e) => {
-                                            const newFlags = {
-                                              ...defaultFlags,
-                                            };
-                                            if (e.target.checked) {
-                                              newFlags[flag.name] = true;
-                                            } else {
-                                              delete newFlags[flag.name];
-                                            }
-                                            setDefaultFlags(newFlags);
-                                          }}
-                                          class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-blue-500 focus:ring-blue-500 focus:ring-offset-0 cursor-pointer"
-                                        />
-                                      </td>
-                                      <td class="p-3">
-                                        <div class="font-medium">
-                                          ${flag.label}
-                                        </div>
-                                        <div class="text-xs text-gray-500">
-                                          ${flag.description}
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  `,
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      `}
                     </div>
                   `}
                 `}
