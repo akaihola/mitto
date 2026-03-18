@@ -1,98 +1,22 @@
-<div align="center">
+# mitto (personal fork – @akaihola)
 
-<img src="icon.png" alt="Mitto" width="128" height="128">
+> ⚠️ This is a personal fork of
+> [inercia/mitto](https://github.com/inercia/mitto).
+> The `main` branch tracks upstream and contains no other changes.
+> Personal modifications live in the branches listed below.
 
-# Mitto
+## Upstream
 
-[![Tests](https://github.com/inercia/mitto/actions/workflows/tests.yml/badge.svg)](https://github.com/inercia/mitto/actions/workflows/tests.yml)
-[![Release](https://github.com/inercia/mitto/actions/workflows/release.yml/badge.svg)](https://github.com/inercia/mitto/actions/workflows/release.yml)
-[![Go 1.24+](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+|             |                                                                     |
+| ----------- | ------------------------------------------------------------------- |
+| Upstream    | [inercia/mitto](https://github.com/inercia/mitto)                   |
+| This fork   | [akaihola/mitto](https://github.com/akaihola/mitto)                 |
+| Synced to   | `main` @ [3934624](https://github.com/inercia/mitto/commit/3934624) |
+| Last synced | 2026-03-18                                                          |
 
-**A modern interface for your team of AI coding agents**
+## Personal branches
 
-CLI • Web Interface • Native macOS App
-
-[Features](#features) • [Quick Start](#quick-start) • [Documentation](#documentation)
-
-</div>
-
----
-
-## Use case
-
-So you have installed some ACP compatible agents, like Claude Code, or Copilot CLI, or Auggie, or any
-other AI coding agent, and you want to have multiple instances running at the same time, each one in
-its own workspace (ie, folder)
-
-<img align="center" src="docs/videos/desktop.gif" alt="Mitto" width="1024"/>
-
-but you also want to be able to continue your work from your browser, or go for a coffee and
-continue talking to your agents from your phone or from your tablet, and you want to be able
-to switch between them easily, and you want to be able to do it all without having to
-install yet another AI coding agent...
-
-<img align="center" src="docs/videos/mobile.gif" alt="Mitto" width="480" />
-
----
-
-## Features
-
-🤖 **Multi-Agent Support** — Connect to Claude Code, Copilot CLI, Auggie or any [ACP-compatible](https://agentcommunicationprotocol.dev/) agent
-
-🖥️ **Multiple Interfaces** — Native macOS app and Web Browser
-
-🖥️ **Mobile fiendly** — Connect from your mobile phone to the sessions in your laptop, and [continue your work on the go](docs/config/ext-access.md). Support touchscreen gestures for switching between conversations and more.
-
-💬 **Session Management** — Automatic conversation history with resume capability
-
-🎨 **Rich Rendering** — Syntax-highlighted code blocks and Markdown support
-
-⚡ **Streaming** — Real-time responses with live updates
-
-🔒 **Permission Control** — Review and approve agent actions
-
-🖥️ **Keyboard shortcuts** — Use keyboard shortcuts to create, delete or navigate between conversations.
-
-## Quick Start
-
-### Install
-
-#### Homebrew (macOS and Linux)
-
-```bash
-brew tap inercia/mitto
-brew install mitto              # CLI only
-brew install --cask mitto-app   # macOS app (includes CLI)
-```
-
-#### Manual Download
-
-Download the latest release from the [releases page](https://github.com/inercia/mitto/releases):
-
-- **macOS**: Download `Mitto-darwin-*.dmg` for the native app, or `mitto-darwin-*.tar.gz` for CLI only
-- **Linux**: Download `mitto-linux-*.tar.gz`
-
-### Configure
-
-- For **Mac OS**, just open the Mitto application from your `/Applications` folder and follow the instructions.
-
-- For **Linux**, follow the instructions [here](docs/config/web/README.md).
-
-## Documentation
-
-- 📖 [Usage Guide](docs/usage.md): Commands, flags, examples
-- ⚙️ [Configuration](docs/config/README.md): ACP servers, settings
-  - 🌐 [Linux/Web Interface](docs/config/web/README.md): Auth, hooks, themes, security
-  - 🍎 [macOS App](docs/config/mac/README.md): Hotkeys, notifications
-- 🔧 [Development](docs/development.md): Building, testing
-- 🏗️ [Architecture](docs/devel/README.md): Design internals
-
-## Requirements
-
-- macOS, Linux
-- An ACP-compatible agent ([Claude Code](https://github.com/zed-industries/claude-code-acp), [Auggie](https://augmentcode.com/), etc.)
-
-## License
-
-[MIT](LICENSE)
+| Branch                                   | Description                              | Status     |
+| ---------------------------------------- | ---------------------------------------- | ---------- |
+| feat/pwa-standalone                      | feat/pwa-standalone                      | local only |
+| fix/csp-dynamic-eval-and-rc-config-merge | fix/csp-dynamic-eval-and-rc-config-merge | local only |
