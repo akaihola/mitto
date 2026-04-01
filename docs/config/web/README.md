@@ -213,9 +213,10 @@ web:
       error_rate_threshold: 0.9 # 90% error rate triggers block
       min_requests: 10 # Min requests before error analysis
       suspicious_path_threshold: 5 # Suspicious path hits before block
-      block_duration_seconds: 86400 # Block for 24 hours
+      block_duration_seconds: 604800 # Block for 7 days (default)
       whitelist: # Additional whitelisted IPs
         - 10.0.0.0/8
+      # ip_block_command: "pfctl -t mitto_blocked -T add {ip}" # Optional OS-level blocking
 ```
 
 To disable scanner defense:

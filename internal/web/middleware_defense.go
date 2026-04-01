@@ -74,12 +74,18 @@ func configToDefenseConfig(cfg *configPkg.ScannerDefenseConfig, enabled bool) de
 	if len(cfg.Whitelist) > 0 {
 		c.Whitelist = cfg.Whitelist
 	}
+	if cfg.IPBlockCommand != "" {
+		c.BlockCommand = cfg.IPBlockCommand
+	}
 
 	return c
 }
 
 // defenseRecordingMiddleware records requests for analysis by the scanner defense system.
 // Only records requests from external connections (not localhost).
+// For already-blocked IPs, silently drops the connection without sending any HTTP response.
+// This is especially important for Tailscale Funnel where the FilteredListener cannot see
+// real client IPs (traffic arrives from Tailscale relay servers via utun interface).
 func (s *Server) defenseRecordingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if s.defense == nil {
@@ -87,7 +93,7 @@ func (s *Server) defenseRecordingMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Only record requests from external connections
+		// Only apply to external connections
 		isExternal, _ := r.Context().Value(ContextKeyExternalConnection).(bool)
 		if !isExternal {
 			next.ServeHTTP(w, r)
@@ -95,6 +101,34 @@ func (s *Server) defenseRecordingMiddleware(next http.Handler) http.Handler {
 		}
 
 		ip := getClientIPWithProxyCheck(r)
+
+		// For already-blocked IPs: silently drop the connection.
+		// Don't send any response — not even a 403 — to give the scanner
+		// zero information about the server's existence.
+		if s.defense.IsBlocked(ip) {
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					conn.Close()
+
+					if s.accessLogger != nil {
+						s.accessLogger.Write(LogEntry{
+							Timestamp:    time.Now(),
+							ClientIP:     ip,
+							Method:       r.Method,
+							Path:         r.URL.Path,
+							StatusCode:   0,
+							EventType:    "blocked_http",
+							ErrorMessage: s.defense.GetBlockReason(ip),
+							IsExternal:   true,
+						})
+					}
+					return
+				}
+			}
+			// Fallback if hijack not available: close without body
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
 
 		// Wrap response writer to capture status code
 		wrapped := &defenseStatusRecorder{ResponseWriter: w, statusCode: 200}

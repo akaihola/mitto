@@ -33,6 +33,13 @@ type Config struct {
 	// Whitelist contains CIDR notation ranges that should never be blocked.
 	Whitelist []string `json:"whitelist"`
 
+	// BlockCommand is an optional external command to run when an IP is blocked.
+	// The placeholder {ip} is replaced with the blocked IP address.
+	// Example: "pfctl -t mitto_blocked -T add {ip}" or "iptables -A INPUT -s {ip} -j DROP"
+	// If empty, no external command is executed (only in-memory blocklist is used).
+	// The command is executed asynchronously so it doesn't block request handling.
+	BlockCommand string `json:"block_command"`
+
 	// PersistPath is the path to the blocklist persistence file.
 	// If empty, persistence is disabled.
 	PersistPath string `json:"persist_path"`
@@ -47,7 +54,7 @@ func DefaultConfig() Config {
 		ErrorRateThreshold:      0.9,
 		MinRequestsForAnalysis:  10,
 		SuspiciousPathThreshold: 5,
-		BlockDuration:           24 * time.Hour,
+		BlockDuration:           7 * 24 * time.Hour, // 7 days
 		Whitelist:               []string{"127.0.0.0/8", "::1/128"},
 	}
 }

@@ -2,6 +2,8 @@ package defense
 
 import (
 	"log/slog"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -113,10 +115,17 @@ func (d *ScannerDefense) blockIP(ip, reason string) {
 		requestCount = stats.TotalRequests
 	}
 
+	// Double block duration for suspicious path scanners — these are definitively
+	// malicious actors probing for vulnerabilities (/.env, /.git, /wp-admin, etc.)
+	blockDuration := d.config.BlockDuration
+	if reason == "suspicious_paths" {
+		blockDuration *= 2
+	}
+
 	entry := &BlockEntry{
 		IP:           ip,
 		BlockedAt:    time.Now(),
-		ExpiresAt:    time.Now().Add(d.config.BlockDuration),
+		ExpiresAt:    time.Now().Add(blockDuration),
 		Reason:       reason,
 		RequestCount: requestCount,
 	}
@@ -139,6 +148,38 @@ func (d *ScannerDefense) blockIP(ip, reason string) {
 
 	// Persist blocklist if path is configured
 	d.persistBlocklist()
+
+	// Execute external block command if configured
+	if d.config.BlockCommand != "" {
+		go d.executeBlockCommand(ip)
+	}
+}
+
+// executeBlockCommand runs the configured external IP block command asynchronously.
+// The {ip} placeholder in the command string is replaced with the actual IP address.
+func (d *ScannerDefense) executeBlockCommand(ip string) {
+	// Replace {ip} placeholder with the actual IP
+	cmdStr := strings.ReplaceAll(d.config.BlockCommand, "{ip}", ip)
+
+	// Use shell to execute the command (supports pipes, redirections, etc.)
+	cmd := exec.Command("sh", "-c", cmdStr)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		d.logger.Warn("ip_block_command_failed",
+			"component", "defense",
+			"ip", ip,
+			"command", cmdStr,
+			"error", err.Error(),
+			"output", string(output),
+		)
+		return
+	}
+
+	d.logger.Info("ip_block_command_executed",
+		"component", "defense",
+		"ip", ip,
+		"command", cmdStr,
+	)
 }
 
 // persistBlocklist saves the blocklist to disk.
@@ -217,6 +258,20 @@ func (d *ScannerDefense) Close() error {
 		"blocked_ips", d.blocklist.Count(),
 	)
 
+	return nil
+}
+
+// GetBlockEntry returns the block entry for an IP, or nil if not blocked.
+func (d *ScannerDefense) GetBlockEntry(ip string) *BlockEntry {
+	if !d.config.Enabled {
+		return nil
+	}
+	entries := d.blocklist.Entries()
+	for _, e := range entries {
+		if e.IP == ip {
+			return e
+		}
+	}
 	return nil
 }
 
