@@ -523,6 +523,9 @@ func NewServer(config Config) (*Server, error) {
 	mux.HandleFunc(apiPrefix+"/api/save-file-to-path", s.handleSaveFileToPath)
 	mux.HandleFunc(apiPrefix+"/api/check-file-exists", s.handleCheckFileExists)
 
+	// Auth info endpoint (public, used by login page to adapt its UI)
+	mux.HandleFunc(apiPrefix+"/api/auth-info", s.HandleAuthInfo)
+
 	// M3: Health check endpoint for load balancer integration and monitoring
 	// This endpoint is intentionally NOT behind auth to allow health checks
 	mux.HandleFunc(apiPrefix+"/api/health", s.handleHealthCheck)
@@ -787,6 +790,27 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONOK(w, response)
+}
+
+// HandleAuthInfo returns information about configured authentication methods.
+// This is a public endpoint (no auth required) so the login page can adapt its UI.
+func (s *Server) HandleAuthInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	info := map[string]bool{
+		"simple":     false,
+		"cloudflare": false,
+	}
+
+	if s.authManager != nil {
+		info["simple"] = s.authManager.HasValidCredentials()
+		info["cloudflare"] = s.authManager.HasCloudflareAccess()
+	}
+
+	writeJSONOK(w, info)
 }
 
 // handleRobotsTxt serves a robots.txt that disallows all crawling.

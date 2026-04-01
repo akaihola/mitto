@@ -1,12 +1,16 @@
 package web
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -14,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/inercia/mitto/internal/appdir"
 	"github.com/inercia/mitto/internal/config"
 	"github.com/inercia/mitto/internal/fileutil"
@@ -78,6 +83,8 @@ type AuthManager struct {
 	rateLimiter *AuthRateLimiter // Rate limiter for failed login attempts
 	apiPrefix   string           // API prefix for URL matching (e.g., "/mitto")
 
+	cfVerifier *oidc.IDTokenVerifier // Cloudflare Access JWT verifier (nil if not configured)
+
 	// Cleanup goroutine control
 	stopCleanup chan struct{}
 	cleanupDone chan struct{}
@@ -120,6 +127,50 @@ func NewAuthManager(authConfig *config.WebAuth) *AuthManager {
 
 	// Load persisted sessions from disk
 	am.loadSessions()
+
+	// Initialize Cloudflare Access verifier if configured
+	if authConfig != nil && authConfig.Cloudflare != nil && authConfig.Cloudflare.Validate() == nil {
+		teamDomain := authConfig.Cloudflare.TeamDomain
+		issuerURL := "https://" + teamDomain
+		certsURL := issuerURL + "/cdn-cgi/access/certs"
+
+		// Build context for JWKS fetcher — optionally with custom CA cert
+		ctx := context.Background()
+		if authConfig.Cloudflare.CACertFile != "" {
+			caCert, err := os.ReadFile(authConfig.Cloudflare.CACertFile)
+			if err != nil {
+				slog.Warn("Failed to read Cloudflare CA cert file",
+					"path", authConfig.Cloudflare.CACertFile,
+					"error", err,
+				)
+			} else {
+				pool, _ := x509.SystemCertPool()
+				if pool == nil {
+					pool = x509.NewCertPool()
+				}
+				pool.AppendCertsFromPEM(caCert)
+				httpClient := &http.Client{
+					Transport: &http.Transport{
+						TLSClientConfig: &tls.Config{RootCAs: pool},
+					},
+				}
+				ctx = oidc.ClientContext(ctx, httpClient)
+				slog.Info("Cloudflare Access using custom CA cert",
+					"path", authConfig.Cloudflare.CACertFile,
+				)
+			}
+		}
+
+		keySet := oidc.NewRemoteKeySet(ctx, certsURL)
+		am.cfVerifier = oidc.NewVerifier(issuerURL, keySet, &oidc.Config{
+			ClientID: authConfig.Cloudflare.Audience,
+		})
+
+		slog.Info("Cloudflare Access authentication enabled",
+			"team_domain", teamDomain,
+			"audience", authConfig.Cloudflare.Audience[:min(8, len(authConfig.Cloudflare.Audience))]+"...",
+		)
+	}
 
 	// Start session cleanup goroutine
 	go am.cleanupLoop()
@@ -314,10 +365,15 @@ func (a *AuthManager) cleanupExpiredSessions() {
 // Returns false if username or password is empty, as external access must NEVER
 // proceed with empty credentials.
 func (a *AuthManager) IsEnabled() bool {
-	return a.config != nil &&
-		a.config.Simple != nil &&
-		a.config.Simple.Username != "" &&
-		a.config.Simple.Password != ""
+	if a == nil || a.config == nil {
+		return false
+	}
+	return a.HasValidCredentials() || a.HasCloudflareAccess()
+}
+
+// HasCloudflareAccess returns true if Cloudflare Access JWT validation is configured.
+func (am *AuthManager) HasCloudflareAccess() bool {
+	return am != nil && am.cfVerifier != nil
 }
 
 // HasValidCredentials returns true if both username and password are non-empty.
@@ -328,6 +384,45 @@ func (a *AuthManager) HasValidCredentials() bool {
 		return false
 	}
 	return a.config.Simple.Username != "" && a.config.Simple.Password != ""
+}
+
+// ValidateCFAccessToken validates a Cloudflare Access JWT from the request.
+// It checks the Cf-Access-Jwt-Assertion header first, then falls back to the
+// CF_Authorization cookie. Returns the authenticated email on success.
+func (am *AuthManager) ValidateCFAccessToken(r *http.Request) (string, error) {
+	if am.cfVerifier == nil {
+		return "", fmt.Errorf("cloudflare access not configured")
+	}
+
+	// Try header first (recommended by Cloudflare)
+	token := r.Header.Get("Cf-Access-Jwt-Assertion")
+
+	// Fall back to cookie
+	if token == "" {
+		if cookie, err := r.Cookie("CF_Authorization"); err == nil {
+			token = cookie.Value
+		}
+	}
+
+	if token == "" {
+		return "", fmt.Errorf("no cloudflare access token found")
+	}
+
+	// Verify signature, issuer, audience, and expiry
+	idToken, err := am.cfVerifier.Verify(r.Context(), token)
+	if err != nil {
+		return "", fmt.Errorf("cloudflare access token validation failed: %w", err)
+	}
+
+	// Extract email from claims
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		return "", fmt.Errorf("failed to parse cloudflare access claims: %w", err)
+	}
+
+	return claims.Email, nil
 }
 
 // CredentialError returns an error describing why credentials are invalid,
@@ -620,6 +715,7 @@ var publicAPIPaths = map[string]bool{
 	"/api/login":             true,
 	"/api/csrf-token":        true, // CSRF token endpoint must be accessible before login
 	"/api/supported-runners": true, // Platform information endpoint (no sensitive data)
+	"/api/auth-info":         true, // Auth info endpoint must be accessible before login (used by login page)
 }
 
 // isPublicPath checks if a path is public (no auth required).
@@ -778,6 +874,28 @@ func (a *AuthManager) AuthMiddleware(next http.Handler) http.Handler {
 			"client_ip", clientIP,
 			"api_prefix", a.apiPrefix,
 		)
+
+		// Check Cloudflare Access JWT
+		if a.HasCloudflareAccess() {
+			hasJWTHeader := r.Header.Get("Cf-Access-Jwt-Assertion") != ""
+			if email, err := a.ValidateCFAccessToken(r); err == nil {
+				logger.Info("AUTH: Cloudflare Access authenticated",
+					"email", email,
+					"path", r.URL.Path,
+					"remote_addr", r.RemoteAddr,
+				)
+				next.ServeHTTP(w, r)
+				return
+			} else if hasJWTHeader {
+				// Only log at warn level if a JWT was actually provided but failed
+				logger.Warn("AUTH: Cloudflare Access JWT validation failed",
+					"error", err,
+					"path", r.URL.Path,
+					"remote_addr", r.RemoteAddr,
+				)
+			}
+			// No JWT or validation failed — fall through to session cookie check
+		}
 
 		// Check for valid session
 		session, valid := a.GetSessionFromRequest(r)

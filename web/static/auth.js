@@ -9,11 +9,37 @@ document.addEventListener("DOMContentLoaded", function () {
   const form = document.getElementById("loginForm");
   const errorDiv = document.getElementById("error");
   const submitBtn = document.getElementById("submitBtn");
+  const cloudflareMsg = document.getElementById("cloudflare-message");
 
   if (!form || !errorDiv || !submitBtn) {
     console.error("Required form elements not found");
     return;
   }
+
+  // Fetch auth info to adapt the UI before showing the form
+  fetch(getApiPrefix() + "/api/auth-info")
+    .then(function (res) {
+      return res.json();
+    })
+    .then(function (info) {
+      if (!info.simple && info.cloudflare) {
+        // Only Cloudflare auth configured: hide login form, show message
+        form.style.display = "none";
+        if (cloudflareMsg) {
+          cloudflareMsg.style.display = "";
+        }
+      } else if (!info.simple && !info.cloudflare) {
+        // No auth configured: show a generic notice in the error div
+        errorDiv.textContent = "No authentication method is configured.";
+        errorDiv.classList.remove("hidden");
+        form.style.display = "none";
+      }
+      // If info.simple is true, show the normal login form (default state)
+    })
+    .catch(function (err) {
+      console.warn("Failed to fetch auth info:", err);
+      // On error, keep the login form visible so the user can still try
+    });
 
   form.addEventListener("submit", async function (e) {
     e.preventDefault();

@@ -234,7 +234,7 @@ func TestExternalConnectionMiddleware(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	middleware := externalConnectionMiddleware(handler)
+	middleware := ExternalConnectionMiddleware(handler)
 
 	req, _ := http.NewRequest("GET", "/api/test", nil)
 	w := &mockResponseWriter{}
