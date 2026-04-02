@@ -372,6 +372,20 @@ const (
 	// Sent from frontend when user confirms running the suggested installation command.
 	// Data: { "command": string }
 	WSMsgTypeRunMCPInstallCommand = "run_mcp_install_command"
+
+	// WSMsgTypeMCPToolsAvailable notifies that MCP tools have been fetched for a workspace.
+	// Sent via the global events WebSocket when tools are successfully retrieved.
+	// Data: { "workspace_uuid": string, "tools": []MCPToolInfo }
+	WSMsgTypeMCPToolsAvailable = "mcp_tools_available"
+
+	// WSMsgTypeRequiredToolsStatus notifies the frontend about required tool pattern availability.
+	// Sent after checking which required tool patterns are satisfied in the workspace.
+	// This is sent progressively as retries discover newly-available tools.
+	// Data: {
+	//   "workspace_uuid": string,
+	//   "patterns": map[string]bool  // e.g., {"jira_*": true, "slack_*": false}
+	// }
+	WSMsgTypeRequiredToolsStatus = "required_tools_status"
 )
 
 // =============================================================================

@@ -2,6 +2,7 @@ package web
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,6 +96,20 @@ func (rl *GeneralRateLimiter) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Skip rate limiting for WebSocket upgrade requests. WebSocket connections
+		// are long-lived (minutes to hours), so the initial HTTP upgrade is a
+		// one-time event per session — not a repeated request pattern that warrants
+		// rate limiting. During startup the frontend opens all sessions simultaneously,
+		// which can easily exhaust the burst budget.
+		//
+		// Abuse protection for WebSocket connections is provided by ConnectionTracker
+		// (max_ws_connections_per_ip), which enforces a hard cap on concurrent
+		// connections per IP. That is the appropriate defence for long-lived connections.
+		if r.Header.Get("Upgrade") == "websocket" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Use getClientIPWithProxyCheck to only trust X-Forwarded-For headers
 		// from configured trusted proxies. This prevents IP spoofing attacks
 		// where attackers set fake X-Forwarded-For headers to bypass rate limiting.
@@ -110,9 +125,28 @@ func (rl *GeneralRateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// rateLimitedStaticPaths contains static paths that should NOT be exempt from
+// rate limiting because they are public-facing and targeted by scanners.
+// auth.html is the login page — scanners hammer it (700+ requests in 3 minutes observed).
+var rateLimitedStaticPaths = map[string]bool{
+	"/auth.html": true,
+}
+
 // isStaticPath returns true if the path is for a static file that should
-// be exempt from rate limiting.
+// be exempt from rate limiting. Certain public-facing pages (like auth.html)
+// are excluded from this exemption to prevent scanner abuse.
 func (rl *GeneralRateLimiter) isStaticPath(path string) bool {
+	// Certain static paths are intentionally rate-limited (e.g., login page).
+	// Check both exact match and suffix to handle API prefix (e.g., /mitto/auth.html).
+	if rateLimitedStaticPaths[path] {
+		return false
+	}
+	for rp := range rateLimitedStaticPaths {
+		if strings.HasSuffix(path, rp) {
+			return false
+		}
+	}
+
 	// Static file extensions that should be exempt from rate limiting
 	staticExtensions := []string{
 		".js", ".css", ".html", ".htm",

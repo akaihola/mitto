@@ -89,6 +89,16 @@
           class="hidden mb-4 p-3 bg-red-500/20 border border-red-500 rounded text-red-400 text-sm"
         ></div>
 
+        <!-- Cloudflare Access Message (shown when only Cloudflare auth is configured) -->
+        <div
+          id="cloudflare-message"
+          style="display: none;"
+          class="text-center text-gray-300 space-y-2"
+        >
+          <p class="text-sm">This instance is protected by Cloudflare Access.</p>
+          <p class="text-sm">Please access through your configured Cloudflare Access URL.</p>
+        </div>
+
         <form id="loginForm" class="space-y-6">
           <div>
             <label

@@ -126,6 +126,11 @@ type ScannerDefenseConfig struct {
 	BlockDurationSeconds int `json:"block_duration_seconds,omitempty"`
 	// Whitelist contains CIDR notation ranges that should never be blocked.
 	Whitelist []string `json:"whitelist,omitempty"`
+	// IPBlockCommand is an optional external command to run when an IP is blocked.
+	// The placeholder {ip} is replaced with the blocked IP address.
+	// Example: "pfctl -t mitto_blocked -T add {ip}" or "iptables -A INPUT -s {ip} -j DROP"
+	// If empty, no external command is executed (only in-memory blocklist is used).
+	IPBlockCommand string `json:"ip_block_command,omitempty" yaml:"ip_block_command,omitempty"`
 }
 
 // ACPServerSettings is the JSON representation of an ACP server.

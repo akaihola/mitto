@@ -80,6 +80,8 @@ import {
   setFilterTab,
   getFilterTabGrouping,
   cycleFilterTabGrouping,
+  fetchConfig,
+  invalidateConfigCache,
 } from "./utils/index.js";
 
 // Import hooks
@@ -2684,11 +2686,14 @@ function App() {
     removeWorkspace,
     refreshWorkspaces,
     forceReconnectActiveSession,
+    reconnectAllSessionsStaggered,
     availableCommands,
     configOptions,
     setConfigOption,
     activeUIPrompt,
     sendUIPromptAnswer,
+    mcpTools,
+    requiredToolsStatus,
   } = useWebSocket();
 
   const [showSidebar, setShowSidebar] = useState(false);
@@ -2821,12 +2826,24 @@ function App() {
       return allowedServers.includes(currentAcpServerType);
     };
 
+    // Helper to check if a prompt's required tools are satisfied
+    // If required_tools is empty, the prompt is always shown
+    // Otherwise, ALL patterns must be satisfied (true in requiredToolsStatus)
+    const isRequiredToolsSatisfied = (prompt) => {
+      if (!prompt.required_tools || prompt.required_tools.trim() === "") {
+        return true; // No tool requirements
+      }
+      const patterns = prompt.required_tools.split(",").map((s) => s.trim()).filter(Boolean);
+      if (patterns.length === 0) return true;
+      return patterns.every((p) => requiredToolsStatus[p] === true);
+    };
+
     // Build a map of prompt names to prompts, with workspace prompts having highest priority
     const promptMap = new Map();
 
-    // First add global prompts (lowest priority), filtered by ACP server
+    // First add global prompts (lowest priority), filtered by ACP server AND required tools
     for (const p of globalPrompts) {
-      if (isAllowedForACP(p)) {
+      if (isAllowedForACP(p) && isRequiredToolsSatisfied(p)) {
         promptMap.set(p.name, { ...p, source: "global" });
       }
     }
@@ -2838,7 +2855,7 @@ function App() {
       );
       if (server?.prompts?.length > 0) {
         for (const p of server.prompts) {
-          if (isAllowedForACP(p)) {
+          if (isAllowedForACP(p) && isRequiredToolsSatisfied(p)) {
             promptMap.set(p.name, { ...p, source: "server" });
           }
         }
@@ -2846,9 +2863,9 @@ function App() {
     }
 
     // Finally add workspace prompts (highest priority - override others with same name)
-    // Workspace prompts are also filtered by ACP server
+    // Workspace prompts are also filtered by ACP server AND required tools
     for (const p of workspacePrompts) {
-      if (isAllowedForACP(p)) {
+      if (isAllowedForACP(p) && isRequiredToolsSatisfied(p)) {
         promptMap.set(p.name, { ...p, source: "workspace" });
       }
     }
@@ -2875,6 +2892,7 @@ function App() {
     sessionInfo?.acp_server,
     acpServersWithPrompts,
     workspacePrompts,
+    requiredToolsStatus,
   ]);
 
   // Initialize CSRF protection and UI preferences on mount
@@ -3559,8 +3577,7 @@ function App() {
 
   // Fetch config on mount to get predefined prompts, UI theme, and check for workspaces
   useEffect(() => {
-    authFetch(apiUrl("/api/config"))
-      .then((res) => res.json())
+    fetchConfig()
       .then((config) => {
         // Load global prompts from top-level prompts
         if (config?.prompts) {
@@ -3825,14 +3842,9 @@ function App() {
         fetchWorkspacePrompts(sessionInfo.working_dir, true);
       }
 
-      // Refresh global prompts
+      // Refresh global prompts (force-bypass cache since files changed on disk)
       const acpServer = sessionInfo?.acp_server;
-      const url = acpServer
-        ? apiUrl(`/api/config?acp_server=${encodeURIComponent(acpServer)}`)
-        : apiUrl("/api/config");
-
-      authFetch(url)
-        .then((res) => res.json())
+      fetchConfig(acpServer || null, /* force */ true)
         .then((config) => {
           if (config?.prompts) {
             setGlobalPrompts(config.prompts);
@@ -3862,9 +3874,8 @@ function App() {
     // Skip if ACP server hasn't changed or isn't set yet
     if (!acpServer || acpServer === globalPromptsACPServer) return;
 
-    // Fetch global prompts filtered by ACP server
-    authFetch(apiUrl(`/api/config?acp_server=${encodeURIComponent(acpServer)}`))
-      .then((res) => res.json())
+    // Fetch global prompts filtered by ACP server (uses cache when fresh)
+    fetchConfig(acpServer)
       .then((config) => {
         if (config?.prompts) {
           setGlobalPrompts(config.prompts);
@@ -4182,7 +4193,7 @@ function App() {
       maxScroll * SCROLL_THRESHOLD_PERCENT,
     );
     const atBottom = container.scrollTop >= maxScroll - threshold;
-    console.log("[scroll] checkIfAtBottom:", {
+    if (window.__debug?.scroll) console.log("[scroll] checkIfAtBottom:", {
       scrollTop: container.scrollTop,
       scrollHeight: container.scrollHeight,
       clientHeight: container.clientHeight,
@@ -4214,7 +4225,7 @@ function App() {
 
     const handleScroll = (source = "scroll") => {
       const atBottom = checkIfAtBottom();
-      console.log(`[scroll] handleScroll(${source}):`, { atBottom });
+      if (window.__debug?.scroll) console.log(`[scroll] handleScroll(${source}):`, { atBottom });
       setIsUserAtBottom(atBottom);
       // Clear new messages indicator when user scrolls to bottom
       if (atBottom) {
@@ -4258,7 +4269,7 @@ function App() {
       container.style.scrollBehavior = "auto";
       const beforeScrollTop = container.scrollTop;
       container.scrollTop = container.scrollHeight; // scrollHeight = visual bottom
-      console.log("[scroll] scrollToBottomInstant:", {
+      if (window.__debug?.scroll) console.log("[scroll] scrollToBottomInstant:", {
         beforeScrollTop,
         afterScrollTop: container.scrollTop,
         scrollHeight: container.scrollHeight,
@@ -4304,7 +4315,7 @@ function App() {
     if (prevIsLoadingMoreRef.current && !isLoadingMore) {
       // Load more just completed - set flag to skip auto-scroll for prepended content
       justLoadedMoreRef.current = true;
-      console.log("[Scroll] Load more completed, will skip auto-scroll");
+      if (window.__debug?.scroll) console.log("[Scroll] Load more completed, will skip auto-scroll");
 
       // Restore scroll position to maintain visual position after prepend
       // The new content was added above, so we need to offset scrollTop by the height difference
@@ -4320,7 +4331,7 @@ function App() {
         const heightDiff = newScrollHeight - savedMetrics.scrollHeight;
         const newScrollTop = savedMetrics.scrollTop + heightDiff;
         container.scrollTop = newScrollTop;
-        console.log("[Scroll] Restored scroll position after prepend:", {
+        if (window.__debug?.scroll) console.log("[Scroll] Restored scroll position after prepend:", {
           oldScrollHeight: savedMetrics.scrollHeight,
           newScrollHeight,
           heightDiff,
@@ -4354,7 +4365,7 @@ function App() {
     // Skip auto-scroll if we just loaded older messages (prepend)
     // The useInfiniteScroll hook handles scroll position restoration for this case
     if (justLoadedMoreRef.current) {
-      console.log("[Scroll] Skipping auto-scroll - just loaded older messages");
+      if (window.__debug?.scroll) console.log("[Scroll] Skipping auto-scroll - just loaded older messages");
       justLoadedMoreRef.current = false;
       prevMessagesLengthRef.current = currentLength;
       return;
@@ -4484,10 +4495,11 @@ function App() {
 
     // App Did Become Active - called from native macOS when app becomes visible
     // WKWebView doesn't fire visibilitychange events, so the native app calls this
-    // to trigger WebSocket reconnection and sync any missed messages
+    // to trigger WebSocket reconnection and sync any missed messages.
+    // Uses staggered reconnect so multiple sessions don't all send load_events simultaneously.
     window.mittoAppDidBecomeActive = () => {
-      console.log("[macOS] App became active, triggering reconnect and sync");
-      forceReconnectActiveSession();
+      console.log("[macOS] App became active, triggering staggered reconnect and sync");
+      reconnectAllSessionsStaggered();
       // Also refresh session list in case there were changes
       fetchStoredSessions();
     };
@@ -4518,6 +4530,7 @@ function App() {
     navigateToPreviousSession,
     switchSession,
     forceReconnectActiveSession,
+    reconnectAllSessionsStaggered,
   ]);
 
   const handleNewSession = async (workspace = null) => {
@@ -5000,14 +5013,9 @@ function App() {
       fetchWorkspacePrompts(sessionInfo.working_dir, false);
     }
 
-    // Refresh global prompts (checks for new/modified prompt files)
+    // Refresh global prompts (uses cache when fresh)
     const acpServer = sessionInfo?.acp_server;
-    const url = acpServer
-      ? apiUrl(`/api/config?acp_server=${encodeURIComponent(acpServer)}`)
-      : apiUrl("/api/config");
-
-    authFetch(url)
-      .then((res) => res.json())
+    fetchConfig(acpServer || null)
       .then((config) => {
         if (config?.prompts) {
           setGlobalPrompts(config.prompts);
@@ -5177,11 +5185,11 @@ function App() {
         onSave=${async () => {
           // Refresh workspaces after saving
           refreshWorkspaces();
-          // Reload config to update prompts and UI settings
+          // Reload config to update prompts and UI settings (invalidate cache first)
+          invalidateConfigCache();
           try {
-            const res = await authFetch(apiUrl("/api/config"));
-            if (res.ok) {
-              const config = await res.json();
+            const config = await fetchConfig();
+            if (config) {
               // Reload global prompts (use empty array if not present)
               setGlobalPrompts(config?.prompts || []);
               // Reload ACP servers with their per-server prompts
@@ -5820,6 +5828,7 @@ function App() {
         isStreaming=${isStreaming}
         configOptions=${configOptions}
         onSetConfigOption=${setConfigOption}
+        mcpTools=${mcpTools}
       />
     </div>
   `;

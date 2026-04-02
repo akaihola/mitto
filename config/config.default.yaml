@@ -34,15 +34,41 @@ web:
   api_prefix: /mitto  # URL prefix for API endpoints (security through obscurity). Set to "" to disable.
   theme: v2  # Options: "default", "v2" (modern theme)
 
-  # hooks:
+  # hooks: (require external_port >= 0 and auth to be configured)
+  #   ## Option 1: Cloudflare quick tunnel (temporary URL, no account needed)
   #   up:
-  #     command: echo "ngrok http ${PORT}"
-  #     name: "ngrok"
+  #     command: "cloudflared tunnel --url http://localhost:${PORT}"
+  #     name: "cloudflare-tunnel"
+  #
+  #   ## Option 2: Cloudflare named tunnel (stable URL, requires account + ~/.cloudflared/config.yml)
+  #   # up:
+  #   #   command: "cloudflared tunnel run mitto"
+  #   #   name: "cloudflare-tunnel"
+  #
+  #   ## Option 3: ngrok
+  #   # up:
+  #   #   command: "ngrok http ${PORT}"
+  #   #   name: "ngrok"
+  #
+  #   ## Option 4: Tailscale Funnel
+  #   # up:
+  #   #   command: "tailscale funnel ${PORT}"
+  #   #   name: "tailscale-funnel"
+  #
   #   # down:
   #   #   command: echo "Shutting down server on port ${PORT}"
   #   #   name: "cleanup"
 
   # auth:
+  #   # Cloudflare Access JWT authentication (SSO/OAuth via Cloudflare)
+  #   # When configured, users authenticated through Cloudflare Access
+  #   # can access Mitto without username/password login.
+  #   # See docs/config/ext-access/cloudflare.md for setup instructions.
+  #   cloudflare:
+  #     team_domain: yourteam.cloudflareaccess.com  # Your Cloudflare Access team domain
+  #     audience: 32eafc7626e737...                 # Application AUD tag from Cloudflare Access
+  #
+  #   # Simple username/password authentication (can be used alone or as fallback with Cloudflare)
   #   simple:
   #     username: admin
   #     password: your-secure-password  # Use a strong password
@@ -86,12 +112,18 @@ web:
   #
   # scanner_defense:
   #   enabled: true                    # Enable scanner defense (default: true when external access is enabled)
-  #   block_duration_seconds: 3600     # How long to block offending IPs in seconds (default: 3600 = 1h)
+  #   block_duration_seconds: 604800   # How long to block offending IPs in seconds (default: 604800 = 7 days)
   #   suspicious_path_threshold: 3     # Block after this many suspicious requests (default: 3)
   #   rate_window_seconds: 60          # Time window for counting suspicious requests in seconds (default: 60 = 1m)
   #   whitelist:                       # CIDR ranges that should never be blocked
   #     - "10.0.0.0/8"
   #     - "192.168.0.0/16"
+  #   ip_block_command: ""             # Optional external command to run when an IP is blocked
+  #                                    # Use {ip} as placeholder for the blocked IP address
+  #                                    # Examples:
+  #                                    #   "pfctl -t mitto_blocked -T add {ip}"          # macOS pf firewall
+  #                                    #   "iptables -A INPUT -s {ip} -j DROP"           # Linux iptables
+  #                                    #   "ufw deny from {ip}"                          # Ubuntu UFW
 
 # UI settings
 # ui:

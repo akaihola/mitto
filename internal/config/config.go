@@ -86,6 +86,10 @@ type WebPrompt struct {
 	// Example: "auggie, claude-code" means only show this prompt for those ACP servers.
 	// This is included so the frontend can filter prompts client-side.
 	ACPs string `json:"acps,omitempty"`
+	// RequiredTools is an optional comma-separated list of tool name patterns required for this prompt.
+	// Patterns support * as wildcard (e.g., "jira_*,slack_*").
+	// Sent to frontend so it can filter prompts based on tool availability.
+	RequiredTools string `json:"required_tools,omitempty"`
 }
 
 // WebHook represents a shell command hook configuration.
@@ -120,12 +124,46 @@ type AuthAllow struct {
 	IPs []string `json:"ips,omitempty"`
 }
 
+// CloudflareAuth represents Cloudflare Access JWT authentication.
+// When configured, requests with a valid Cloudflare Access JWT
+// (in the Cf-Access-Jwt-Assertion header or CF_Authorization cookie)
+// are authenticated without requiring username/password login.
+type CloudflareAuth struct {
+	TeamDomain string `json:"team_domain" yaml:"team_domain"`                       // e.g. "yourteam.cloudflareaccess.com"
+	Audience   string `json:"audience"    yaml:"audience"`                          // Application AUD tag from Cloudflare Access
+	CACertFile string `json:"ca_cert_file,omitempty" yaml:"ca_cert_file,omitempty"` // Optional: path to CA cert for JWKS endpoint (useful for testing or private CAs)
+}
+
+// Validate checks that the Cloudflare Access configuration is valid.
+func (c *CloudflareAuth) Validate() error {
+	if c.TeamDomain == "" {
+		return fmt.Errorf("cloudflare auth: team_domain is required")
+	}
+	if strings.Contains(c.TeamDomain, "://") {
+		return fmt.Errorf("cloudflare auth: team_domain should be a domain name, not a URL (e.g., 'yourteam.cloudflareaccess.com')")
+	}
+	if strings.Contains(c.TeamDomain, "/") {
+		return fmt.Errorf("cloudflare auth: team_domain should not contain path components")
+	}
+	if c.Audience == "" {
+		return fmt.Errorf("cloudflare auth: audience is required (Application AUD tag from Cloudflare Access)")
+	}
+	return nil
+}
+
 // WebAuth represents authentication configuration for the web interface.
 type WebAuth struct {
 	// Simple enables simple username/password authentication when set
-	Simple *SimpleAuth `json:"simple,omitempty"`
+	Simple *SimpleAuth `json:"simple,omitempty" yaml:"simple,omitempty"`
+	// Cloudflare enables Cloudflare Access JWT authentication when set
+	Cloudflare *CloudflareAuth `json:"cloudflare,omitempty" yaml:"cloudflare,omitempty"`
 	// Allow contains IP addresses/CIDR ranges that bypass authentication
-	Allow *AuthAllow `json:"allow,omitempty"`
+	Allow *AuthAllow `json:"allow,omitempty" yaml:"allow,omitempty"`
+}
+
+// HasCloudflareAuth returns true if Cloudflare Access authentication is configured and valid.
+func (w *WebAuth) HasCloudflareAuth() bool {
+	return w != nil && w.Cloudflare != nil && w.Cloudflare.Validate() == nil
 }
 
 // WebSecurity represents security configuration for the web interface.
@@ -946,6 +984,11 @@ type rawConfig struct {
 				Username string `yaml:"username"`
 				Password string `yaml:"password"`
 			} `yaml:"simple"`
+			Cloudflare *struct {
+				TeamDomain string `yaml:"team_domain"`
+				Audience   string `yaml:"audience"`
+				CACertFile string `yaml:"ca_cert_file"`
+			} `yaml:"cloudflare"`
 			Allow *struct {
 				IPs []string `yaml:"ips"`
 			} `yaml:"allow"`
@@ -1154,6 +1197,13 @@ func Parse(data []byte) (*Config, error) {
 			cfg.Web.Auth.Simple = &SimpleAuth{
 				Username: raw.Web.Auth.Simple.Username,
 				Password: raw.Web.Auth.Simple.Password,
+			}
+		}
+		if raw.Web.Auth.Cloudflare != nil {
+			cfg.Web.Auth.Cloudflare = &CloudflareAuth{
+				TeamDomain: raw.Web.Auth.Cloudflare.TeamDomain,
+				Audience:   raw.Web.Auth.Cloudflare.Audience,
+				CACertFile: raw.Web.Auth.Cloudflare.CACertFile,
 			}
 		}
 		if raw.Web.Auth.Allow != nil && len(raw.Web.Auth.Allow.IPs) > 0 {

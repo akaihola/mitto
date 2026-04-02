@@ -36,9 +36,27 @@ async function loadModuleFromUrl(url) {
   return await import(url);
 }
 
+// Timeout for CDN loading — if CDN is slow rather than failing fast, we fall back to local.
+const CDN_TIMEOUT_MS = 3000;
+
+/**
+ * Race a promise against a timeout.
+ * @param {Promise<any>} promise - The promise to race
+ * @param {number} ms - Timeout in milliseconds
+ * @returns {Promise<any>} Resolves/rejects with the promise result, or rejects on timeout
+ */
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`CDN loading timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 /**
  * Try to load all vendor libraries from CDN.
- * Returns null if any library fails (all-or-nothing approach to avoid mismatches).
+ * Returns null if any library fails or times out (all-or-nothing approach to avoid mismatches).
  * @returns {Promise<object|null>} Object with all modules, or null if any failed
  */
 async function tryLoadFromCDN() {
@@ -51,19 +69,26 @@ async function tryLoadFromCDN() {
     // preact and preact-hooks from local (they're tightly coupled), but
     // independent libraries (htm, marked, dompurify) can come from CDN.
 
-    const [preactModule, hooksModule, htmModule, markedModule, dompurifyModule] = await Promise.all([
-      // Preact and hooks MUST be from the same source (local) to avoid __H mismatch
-      loadModuleFromUrl(LOCAL_URLS.preact),
-      loadModuleFromUrl(LOCAL_URLS.preactHooks),
-      // Independent libraries can come from CDN
-      loadModuleFromUrl(CDN_URLS.htm),
-      loadModuleFromUrl(CDN_URLS.marked),
-      loadModuleFromUrl(CDN_URLS.dompurify),
-    ]);
+    const [preactModule, hooksModule, htmModule, markedModule, dompurifyModule] = await withTimeout(
+      Promise.all([
+        // Preact and hooks MUST be from the same source (local) to avoid __H mismatch
+        loadModuleFromUrl(LOCAL_URLS.preact),
+        loadModuleFromUrl(LOCAL_URLS.preactHooks),
+        // Independent libraries can come from CDN
+        loadModuleFromUrl(CDN_URLS.htm),
+        loadModuleFromUrl(CDN_URLS.marked),
+        loadModuleFromUrl(CDN_URLS.dompurify),
+      ]),
+      CDN_TIMEOUT_MS
+    );
 
     return { preactModule, hooksModule, htmModule, markedModule, dompurifyModule, source: "mixed (preact local, others CDN)" };
   } catch (err) {
-    console.warn("CDN loading failed, will use all local:", err.message);
+    if (err.message.includes("timed out")) {
+      console.warn(`CDN loading timed out after ${CDN_TIMEOUT_MS / 1000}s, falling back to local`);
+    } else {
+      console.warn("CDN loading failed, will use all local:", err.message);
+    }
     return null;
   }
 }

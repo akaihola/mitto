@@ -23,7 +23,7 @@ level. This protects against automated vulnerability scanners and brute-force at
 | Rate limit       | 100 req/min | Max requests per minute before blocking  |
 | Error rate       | 90%         | Error rate threshold (with 10+ requests) |
 | Suspicious paths | 5 hits      | Suspicious path hits before blocking     |
-| Block duration   | 24 hours    | How long IPs remain blocked              |
+| Block duration   | 7 days      | How long IPs remain blocked              |
 
 **Customization:**
 
@@ -43,12 +43,19 @@ web:
       error_rate_threshold: 0.8 # 80% error rate triggers block
       min_requests: 10 # Min requests before error analysis
       suspicious_path_threshold: 3 # Suspicious path hits before block
-      block_duration_seconds: 86400 # Block for 24 hours
+      block_duration_seconds: 604800 # Block for 7 days (default)
 
       # Additional whitelisted IPs (localhost is always whitelisted)
       whitelist:
         - 10.0.0.0/8
         - 192.168.0.0/16
+
+      # Optional: run an external command when an IP is blocked.
+      # Use {ip} as placeholder for the blocked IP address.
+      # The command runs asynchronously and does not block request handling.
+      # ip_block_command: "pfctl -t mitto_blocked -T add {ip}"   # macOS pf firewall
+      # ip_block_command: "iptables -A INPUT -s {ip} -j DROP"    # Linux iptables
+      # ip_block_command: "ufw deny from {ip}"                   # Ubuntu UFW
 ```
 
 **Disable Scanner Defense:**

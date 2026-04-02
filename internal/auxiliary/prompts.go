@@ -134,6 +134,55 @@ You MUST not call any tool for this task.
 Respond quickly.
 `
 
+	// FetchMCPToolsPromptTemplate asks the agent for all its available tools.
+	// This prompt requires no parameters (do not use fmt.Sprintf).
+	FetchMCPToolsPromptTemplate = `List ALL MCP tools currently available to you.
+Include the tools from any connected MCP servers.
+
+Respond ONLY with a valid JSON object in one of these formats:
+
+{
+  "tools": [
+    {
+      "name": "exact_tool_name",
+      "description": "brief description"
+    }
+  ]
+}
+
+If you find any problem, instead respond with:
+
+{
+  "error": "the error description"
+}
+
+The "tools" value MUST be a JSON array of objects, one per available tool.
+Do NOT call any tools: just list them. Return ONLY the JSON object, with no extra text.
+`
+
+	// CheckRequiredToolsPromptTemplate asks the agent to check if specific tool patterns
+	// have matching MCP tools available. Use with fmt.Sprintf, passing the comma-separated patterns.
+	// This is sent to the same PurposeMCPTools auxiliary session, so the agent already has
+	// context from the initial FetchMCPTools query.
+	CheckRequiredToolsPromptTemplate = `Check if you have any MCP tools matching each of these name patterns.
+Patterns use * as a wildcard (e.g., "jira_*" matches any tool starting with "jira_").
+
+Patterns to check: %s
+
+For each pattern, respond with true if you have at least one matching tool, false otherwise.
+
+Respond ONLY with a valid JSON object in this exact format:
+{
+  "patterns": {
+    "pattern1": true,
+    "pattern2": false
+  }
+}
+
+Do NOT call any tools. Just check your list of available tools and respond with the JSON.
+Return ONLY the JSON object, with no extra text.
+`
+
 	// CheckMCPAvailabilityPromptTemplate is used to verify if Mitto MCP tools are available.
 	// Use with fmt.Sprintf, passing the MCP server URL.
 	CheckMCPAvailabilityPromptTemplate = `

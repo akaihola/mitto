@@ -63,6 +63,10 @@ type Config struct {
 	// AccessLog is the configuration for security access logging.
 	// If Path is empty, access logging is disabled.
 	AccessLog AccessLogConfig
+
+	// DisableAuxiliaryPrewarm disables auxiliary session pre-warming on process creation.
+	// Used in tests to avoid interference with mock ACP servers.
+	DisableAuxiliaryPrewarm bool
 }
 
 // GetWorkspaces returns the effective list of workspaces.
@@ -254,6 +258,7 @@ func NewServer(config Config) (*Server, error) {
 
 	// Create shared ACP process manager for workspace-level process sharing
 	acpProcessMgr := NewACPProcessManager(context.Background(), logger)
+	acpProcessMgr.DisableAuxiliary = config.DisableAuxiliaryPrewarm || os.Getenv("MITTO_TEST_MODE") != ""
 	sessionMgr.SetACPProcessManager(acpProcessMgr)
 
 	// Set global conversations config for message processing
@@ -517,6 +522,9 @@ func NewServer(config Config) (*Server, error) {
 	// File save endpoints - restricted to localhost only (used by native macOS app)
 	mux.HandleFunc(apiPrefix+"/api/save-file-to-path", s.handleSaveFileToPath)
 	mux.HandleFunc(apiPrefix+"/api/check-file-exists", s.handleCheckFileExists)
+
+	// Auth info endpoint (public, used by login page to adapt its UI)
+	mux.HandleFunc(apiPrefix+"/api/auth-info", s.HandleAuthInfo)
 
 	// M3: Health check endpoint for load balancer integration and monitoring
 	// This endpoint is intentionally NOT behind auth to allow health checks
@@ -782,6 +790,27 @@ func (s *Server) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSONOK(w, response)
+}
+
+// HandleAuthInfo returns information about configured authentication methods.
+// This is a public endpoint (no auth required) so the login page can adapt its UI.
+func (s *Server) HandleAuthInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	info := map[string]bool{
+		"simple":     false,
+		"cloudflare": false,
+	}
+
+	if s.authManager != nil {
+		info["simple"] = s.authManager.HasValidCredentials()
+		info["cloudflare"] = s.authManager.HasCloudflareAccess()
+	}
+
+	writeJSONOK(w, info)
 }
 
 // handleRobotsTxt serves a robots.txt that disallows all crawling.

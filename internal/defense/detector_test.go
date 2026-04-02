@@ -10,6 +10,10 @@ func TestIsSuspiciousPath(t *testing.T) {
 		{"/.env", true},
 		{"/.git/config", true},
 		{"/wp-admin", true},
+		{"/wp-login", true},
+		{"/wp-includes/some-file.php", true},
+		{"/wp-json/wp/v2/posts", true},
+		{"/xmlrpc.php", true},
 		{"/phpmyadmin", true},
 		{"/api/.env", true},
 		{"/api/v1/.env", true},
@@ -23,6 +27,7 @@ func TestIsSuspiciousPath(t *testing.T) {
 		{"/api/health", false},
 		{"/static/app.js", false},
 		{"/index.html", false},
+		{"/auth.html", false}, // auth.html is rate-limited, not suspicious
 	}
 
 	for _, tt := range tests {

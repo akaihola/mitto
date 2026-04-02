@@ -18,9 +18,10 @@ func (s *Server) SetExternalPort(port int) {
 	s.externalPort = port
 }
 
-// externalConnectionMiddleware wraps requests to mark them as coming from the external listener.
+// ExternalConnectionMiddleware wraps requests to mark them as coming from the external listener.
 // This ensures authentication is required for ALL external connections, even from localhost.
-func externalConnectionMiddleware(next http.Handler) http.Handler {
+// Exported for use in integration tests.
+func ExternalConnectionMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Add context value indicating this is an external connection
 		ctx := context.WithValue(r.Context(), ContextKeyExternalConnection, true)
@@ -92,7 +93,7 @@ func (s *Server) StartExternalListener(port int) (int, error) {
 	// Create a separate HTTP server for external connections that marks all requests
 	// as external. This ensures auth is required even for localhost connections.
 	externalServer := &http.Server{
-		Handler: externalConnectionMiddleware(s.httpServer.Handler),
+		Handler: ExternalConnectionMiddleware(s.httpServer.Handler),
 	}
 	s.externalHTTPServer = externalServer
 
