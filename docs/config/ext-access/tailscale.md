@@ -27,6 +27,17 @@ web:
 - **Tailnet integration** - Accessible only to your Tailscale network or publicly
 - **No account/limits** - Part of your Tailscale plan
 
+### Performance
+
+Tailscale Funnel may feel slower than alternatives like Cloudflare Tunnel. This is
+because Tailscale is designed primarily for mesh VPN (direct WireGuard connections
+between devices), and Funnel adds HTTP proxying through Tailscale's DERP relay
+network. DERP relays have fewer points of presence than Cloudflare's 300+ edge
+cities, so traffic often travels further before reaching a relay. Additionally,
+the WireGuard encapsulation adds overhead for HTTP traffic that isn't present in
+purpose-built HTTP tunnel solutions. For latency-sensitive use, consider
+[Cloudflare Tunnel](cloudflare.md) as an alternative.
+
 ## Security Considerations
 
 - You can restrict access to your Tailnet only (no public exposure)

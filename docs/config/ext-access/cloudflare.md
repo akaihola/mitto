@@ -165,6 +165,27 @@ tunnel always knows where to connect.
 - **No exposed ports** — Outbound-only connections, no firewall changes
 - **WebSocket support** — Works out of the box, including `wss://`
 
+### Performance
+
+Cloudflare tunnels are noticeably faster than alternatives like Tailscale Funnel.
+The main reasons:
+
+- **Edge proximity** — Cloudflare has edge nodes in 300+ cities worldwide. Your
+  browser connects to the nearest edge (often in the same city), which then routes
+  through the tunnel to your machine. Tailscale's DERP relay network has far fewer
+  points of presence, so traffic often travels further before reaching a relay.
+- **HTTP-optimized infrastructure** — Cloudflare is fundamentally a CDN company.
+  Their network is purpose-built for HTTP/WebSocket traffic with optimized routing,
+  connection pooling, and TLS termination at the edge. Tailscale is designed for
+  mesh VPN (device-to-device WireGuard), and Funnel adds HTTP proxying on top of
+  that, which introduces overhead.
+- **QUIC transport** — The `cloudflared` tunnel uses QUIC for the connection between
+  your machine and Cloudflare's edge, which reduces connection setup latency and
+  handles packet loss better than TCP-based alternatives.
+- **TLS termination at the edge** — Cloudflare terminates TLS close to the user and
+  uses optimized internal routing to the tunnel. With Tailscale Funnel, the full TLS
+  handshake and encrypted payload must traverse the relay network.
+
 ## Troubleshooting
 
 ### Quick tunnel shows 404
