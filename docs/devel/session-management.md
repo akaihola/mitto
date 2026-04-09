@@ -249,9 +249,9 @@ Both auto-children and MCP-created children have a `ParentSessionID`, but only a
 
 `store.Delete()` calls `handleChildSessionsOnParentDelete()` before removing the session:
 
-| Child type                    | On parent delete        |
-| ----------------------------- | ----------------------- |
-| Auto-child (`IsAutoChild=true`) | **Cascade deleted** (recursively) |
+| Child type                      | On parent delete                         |
+| ------------------------------- | ---------------------------------------- |
+| Auto-child (`IsAutoChild=true`) | **Cascade deleted** (recursively)        |
 | MCP-child (`IsAutoChild=false`) | **Orphaned** (`ParentSessionID` cleared) |
 
 ### createAutoChildren() Flow

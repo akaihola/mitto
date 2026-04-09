@@ -230,17 +230,17 @@ Provide specific suggestions with code examples where applicable.
 
 ### Front-matter Fields
 
-| Field             | Required | Type     | Description                                                        |
-| ----------------- | -------- | -------- | ------------------------------------------------------------------ |
-| `name`            | No\*     | string   | Display name for the button. If omitted, derived from filename.    |
-| `description`     | No       | string   | Tooltip text shown on hover                                        |
-| `backgroundColor` | No       | string   | Hex color for the button (e.g., `"#E8F5E9"`)                       |
-| `icon`            | No       | string   | Icon identifier (reserved for future use)                          |
-| `tags`            | No       | string[] | Categorization tags (reserved for future use)                      |
-| `enabled`         | No       | bool     | Set to `false` to disable the prompt. Default: `true`              |
+| Field             | Required | Type     | Description                                                                                  |
+| ----------------- | -------- | -------- | -------------------------------------------------------------------------------------------- |
+| `name`            | No\*     | string   | Display name for the button. If omitted, derived from filename.                              |
+| `description`     | No       | string   | Tooltip text shown on hover                                                                  |
+| `backgroundColor` | No       | string   | Hex color for the button (e.g., `"#E8F5E9"`)                                                 |
+| `icon`            | No       | string   | Icon identifier (reserved for future use)                                                    |
+| `tags`            | No       | string[] | Categorization tags (reserved for future use)                                                |
+| `enabled`         | No       | bool     | Set to `false` to disable the prompt. Default: `true`                                        |
 | `enabledWhen`     | No       | string   | CEL expression for conditional enablement. See [below](#enabledwhen-conditional-enablement). |
-| `enabledWhenACP`  | No       | string   | Comma-separated ACP server names where this prompt appears         |
-| `enabledWhenMCP`  | No       | string   | Glob pattern for MCP tools required for this prompt to appear      |
+| `enabledWhenACP`  | No       | string   | Comma-separated ACP server names where this prompt appears                                   |
+| `enabledWhenMCP`  | No       | string   | Glob pattern for MCP tools required for this prompt to appear                                |
 
 \*If `name` is not specified, it's derived from the filename (e.g., `code-review.md` →
 "code-review").
@@ -249,12 +249,12 @@ Provide specific suggestions with code examples where applicable.
 
 Mitto provides a family of `enabled*` fields for controlling when prompts appear:
 
-| Field            | Type   | Evaluated | Use Case                                    |
-| ---------------- | ------ | --------- | ------------------------------------------- |
-| `enabled`        | bool   | At load   | Permanently disable a prompt                |
-| `enabledWhen`    | CEL    | At display| Dynamic conditions based on session context |
-| `enabledWhenACP` | string | At display| Restrict to specific AI agents              |
-| `enabledWhenMCP` | string | At display| Require specific MCP tools to be available  |
+| Field            | Type   | Evaluated  | Use Case                                    |
+| ---------------- | ------ | ---------- | ------------------------------------------- |
+| `enabled`        | bool   | At load    | Permanently disable a prompt                |
+| `enabledWhen`    | CEL    | At display | Dynamic conditions based on session context |
+| `enabledWhenACP` | string | At display | Restrict to specific AI agents              |
+| `enabledWhenMCP` | string | At display | Require specific MCP tools to be available  |
 
 **Evaluation order:** If `enabled: false`, the prompt is never loaded. Otherwise, all
 three `enabledWhen*` conditions must be satisfied for the prompt to appear.
@@ -275,6 +275,7 @@ enabledWhenMCP: "jira_*, mitto_conversation_*"
 ```
 
 This prompt:
+
 - Is enabled (not permanently disabled)
 - Only appears in parent conversations (not children)
 - Only appears when using Auggie or Claude Code
@@ -344,71 +345,71 @@ prompt is shown (fail-open behavior for safety).
 
 Information about the AI agent (ACP server) used in the current conversation.
 
-| Variable          | Type       | Description                                      |
-| ----------------- | ---------- | ------------------------------------------------ |
-| `acp.name`        | string     | ACP server name (e.g., `"Claude Code"`)          |
-| `acp.type`        | string     | Server type (e.g., `"claude"`, `"auggie"`)       |
-| `acp.tags`        | list[str]  | Server tags (e.g., `["coding", "fast"]`)         |
-| `acp.autoApprove` | bool       | Whether auto-approve is enabled                  |
+| Variable          | Type      | Description                                |
+| ----------------- | --------- | ------------------------------------------ |
+| `acp.name`        | string    | ACP server name (e.g., `"Claude Code"`)    |
+| `acp.type`        | string    | Server type (e.g., `"claude"`, `"auggie"`) |
+| `acp.tags`        | list[str] | Server tags (e.g., `["coding", "fast"]`)   |
+| `acp.autoApprove` | bool      | Whether auto-approve is enabled            |
 
 #### Workspace Context (`workspace.*`)
 
 Information about the current workspace.
 
-| Variable           | Type   | Description                                      |
-| ------------------ | ------ | ------------------------------------------------ |
-| `workspace.uuid`   | string | Unique workspace identifier                      |
-| `workspace.folder` | string | Workspace directory path                         |
-| `workspace.name`   | string | Display name (if configured)                     |
+| Variable           | Type   | Description                  |
+| ------------------ | ------ | ---------------------------- |
+| `workspace.uuid`   | string | Unique workspace identifier  |
+| `workspace.folder` | string | Workspace directory path     |
+| `workspace.name`   | string | Display name (if configured) |
 
 #### Session Context (`session.*`)
 
 Information about the current conversation/session.
 
-| Variable              | Type   | Description                                      |
-| --------------------- | ------ | ------------------------------------------------ |
-| `session.id`          | string | Session identifier                               |
-| `session.name`        | string | Session display name                             |
-| `session.isChild`     | bool   | `true` if this is a child conversation           |
-| `session.isAutoChild` | bool   | `true` if created automatically by parent        |
-| `session.parentId`    | string | Parent session ID (empty if not a child)         |
+| Variable              | Type   | Description                               |
+| --------------------- | ------ | ----------------------------------------- |
+| `session.id`          | string | Session identifier                        |
+| `session.name`        | string | Session display name                      |
+| `session.isChild`     | bool   | `true` if this is a child conversation    |
+| `session.isAutoChild` | bool   | `true` if created automatically by parent |
+| `session.parentId`    | string | Parent session ID (empty if not a child)  |
 
 #### Parent Context (`parent.*`)
 
 Information about the parent conversation (only meaningful for child sessions).
 
-| Variable           | Type   | Description                                      |
-| ------------------ | ------ | ------------------------------------------------ |
-| `parent.exists`    | bool   | `true` if parent session exists                  |
-| `parent.name`      | string | Parent session name                              |
-| `parent.acpServer` | string | ACP server used by parent                        |
+| Variable           | Type   | Description                     |
+| ------------------ | ------ | ------------------------------- |
+| `parent.exists`    | bool   | `true` if parent session exists |
+| `parent.name`      | string | Parent session name             |
+| `parent.acpServer` | string | ACP server used by parent       |
 
 #### Children Context (`children.*`)
 
 Information about child conversations spawned from this session.
 
-| Variable              | Type       | Description                                |
-| --------------------- | ---------- | ------------------------------------------ |
-| `children.count`      | int        | Number of direct child sessions            |
-| `children.exists`     | bool       | `true` if has at least one child           |
-| `children.names`      | list[str]  | List of child session names                |
-| `children.acpServers` | list[str]  | List of ACP servers used by children       |
+| Variable              | Type      | Description                          |
+| --------------------- | --------- | ------------------------------------ |
+| `children.count`      | int       | Number of direct child sessions      |
+| `children.exists`     | bool      | `true` if has at least one child     |
+| `children.names`      | list[str] | List of child session names          |
+| `children.acpServers` | list[str] | List of ACP servers used by children |
 
 #### MCP Tools Context (`tools.*`)
 
 Information about available MCP tools. Note: Tool information may not be available
 immediately when a session starts.
 
-| Variable          | Type       | Description                                      |
-| ----------------- | ---------- | ------------------------------------------------ |
-| `tools.available` | bool       | `true` if tool list has been loaded              |
-| `tools.names`     | list[str]  | List of available tool names                     |
+| Variable          | Type      | Description                         |
+| ----------------- | --------- | ----------------------------------- |
+| `tools.available` | bool      | `true` if tool list has been loaded |
+| `tools.names`     | list[str] | List of available tool names        |
 
 **Custom function:**
 
-| Function                   | Returns | Description                                 |
-| -------------------------- | ------- | ------------------------------------------- |
-| `tools.hasPattern(glob)`   | bool    | `true` if any tool matches the glob pattern |
+| Function                 | Returns | Description                                 |
+| ------------------------ | ------- | ------------------------------------------- |
+| `tools.hasPattern(glob)` | bool    | `true` if any tool matches the glob pattern |
 
 The glob pattern supports `*` (any characters) and `?` (single character).
 
@@ -519,12 +520,14 @@ enabledWhenMCP: mitto_conversation_*
 CEL is a simple expression language designed for evaluation. Key features:
 
 **Operators:**
+
 - Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - Logical: `&&` (and), `||` (or), `!` (not)
 - Membership: `in` (e.g., `"tag" in acp.tags`)
 - Ternary: `condition ? value_if_true : value_if_false`
 
 **String functions:**
+
 - `str.startsWith(prefix)` - Check prefix
 - `str.endsWith(suffix)` - Check suffix
 - `str.contains(substring)` - Check substring
@@ -532,12 +535,14 @@ CEL is a simple expression language designed for evaluation. Key features:
 - `str.size()` - String length
 
 **List functions:**
+
 - `list.size()` - List length
 - `value in list` - Membership check
 - `list.exists(x, condition)` - Any element matches
 - `list.all(x, condition)` - All elements match
 
 **Examples:**
+
 ```cel
 // String operations
 acp.name.startsWith("Claude")

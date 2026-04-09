@@ -55,10 +55,10 @@ Mitto ships with builtin processors that are automatically deployed to `MITTO_DI
 
 ### Included Builtin Processors
 
-| Processor | Description | When | Enabled |
-|-----------|-------------|------|---------|
-| `session-context` | Injects session identity, parent/child relationships, and available agents into the first message | `first` | Yes |
-| `check-mcp-tools` | Checks if Mitto MCP tools are available and suggests installation if missing | `first` | Yes |
+| Processor           | Description                                                                                              | When    | Enabled                                       |
+| ------------------- | -------------------------------------------------------------------------------------------------------- | ------- | --------------------------------------------- |
+| `session-context`   | Injects session identity, parent/child relationships, and available agents into the first message        | `first` | Yes                                           |
+| `check-mcp-tools`   | Checks if Mitto MCP tools are available and suggests installation if missing                             | `first` | Yes                                           |
 | `delegate-to-coder` | Suggests delegating coding tasks to a faster model when using a premium reasoning model (Opus, o3, etc.) | `first` | Yes (only activates for matching ACP servers) |
 
 ### Managing Builtin Processors
@@ -174,15 +174,15 @@ or `command` (command-mode) — not both.
 
 ```yaml
 # Required fields
-name: my-processor             # Human-readable identifier
-when: first                    # "first", "all", or "all-except-first"
+name: my-processor # Human-readable identifier
+when: first # "first", "all", or "all-except-first"
 
 # --- Text-mode (use ONE of the two modes) ---
-text: |                        # Static text to inject (no command needed)
+text: | # Static text to inject (no command needed)
   Your static content here.
 
 # --- Command-mode (use ONE of the two modes) ---
-command: /path/to/script.sh    # Command to execute (see Command Resolution)
+command: /path/to/script.sh # Command to execute (see Command Resolution)
 
 # Optional fields
 description: "Adds context" # Description of what the processor does
@@ -213,8 +213,8 @@ enabledWhenMCP: "mitto_conversation_*, jira_*"
 
 # Automatic re-run for "when: first" processors (refreshes context periodically)
 rerun:
-  afterTime: 30m     # re-run after 30 minutes since last run
-  afterSentMsgs: 20  # re-run after 20 user messages since last run
+  afterTime: 30m # re-run after 30 minutes since last run
+  afterSentMsgs: 20 # re-run after 20 user messages since last run
 ```
 
 ### Conditional Enablement
@@ -239,7 +239,6 @@ both `enabledWhen` and `enabledWhenMCP` conditions must be satisfied.
 - `workspace.uuid`, `workspace.folder`, `workspace.name`
 - `tools.available`, `tools.names`, `tools.hasPattern("glob_*")`
 
-
 ### Automatic Re-run (`rerun`)
 
 Processors with `when: first` normally fire only once (on the first message after session
@@ -249,14 +248,14 @@ context for the LLM.
 ```yaml
 when: first
 rerun:
-  afterTime: 30m      # re-run after 30 minutes since last run
-  afterSentMsgs: 20   # re-run after 20 user messages since last run
+  afterTime: 30m # re-run after 30 minutes since last run
+  afterSentMsgs: 20 # re-run after 20 user messages since last run
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `afterTime` | duration | Time since last run (`"10m"`, `"1h"`, `"30s"`, `"2h30m"`) |
-| `afterSentMsgs` | int | Number of user messages sent since last run |
+| Field           | Type     | Description                                               |
+| --------------- | -------- | --------------------------------------------------------- |
+| `afterTime`     | duration | Time since last run (`"10m"`, `"1h"`, `"30s"`, `"2h30m"`) |
+| `afterSentMsgs` | int      | Number of user messages sent since last run               |
 
 If both are set, whichever threshold is reached first triggers the re-run.
 
@@ -265,7 +264,6 @@ correct because `isFirstPrompt = true` on session resume already handles the res
 
 > **Note:** `rerun` is only valid with `when: first`. The loader rejects processors that
 > combine `rerun` with other `when` values.
-
 
 ## Command Resolution (Command-Mode Only)
 
@@ -438,20 +436,20 @@ base64-encoded automatically.
 
 The following environment variables are automatically set for all processors:
 
-| Variable                      | Description                                           | Example                                                   |
-| ----------------------------- | ----------------------------------------------------- | --------------------------------------------------------- |
-| `MITTO_SESSION_ID`            | Current session ID                                    | `20260131-143052-a1b2c3d4`                                |
-| `MITTO_WORKING_DIR`           | Session working directory                             | `/Users/me/myproject`                                     |
-| `MITTO_IS_FIRST_MESSAGE`      | Whether this is the first message                     | `true` or `false`                                         |
-| `MITTO_PROCESSORS_DIR`        | Path to the processors directory                      | `~/Library/Application Support/Mitto/processors`          |
-| `MITTO_PROCESSOR_FILE`        | Path to the current processor's YAML file             | `.../processors/my-processor.yaml`                        |
-| `MITTO_PROCESSOR_DIR`         | Directory containing the current processor file       | `.../processors`                                          |
-| `MITTO_PARENT_SESSION_ID`     | Parent conversation ID (empty if root)                | `20260130-100000-aabbccdd`                                |
-| `MITTO_PARENT_SESSION_NAME`   | Parent conversation title/name (empty if no parent)   | `Fix login bug`                                           |
-| `MITTO_SESSION_NAME`          | Conversation title/name                               | `Fix login bug`                                           |
-| `MITTO_ACP_SERVER`            | Active ACP server name                                | `claude-code`                                             |
-| `MITTO_WORKSPACE_UUID`        | Workspace identifier                                  | `d4e5f6a7-b8c9-...`                                       |
-| `MITTO_AVAILABLE_ACP_SERVERS` | JSON array of servers with workspaces for this folder | `[{"name":"auggie","tags":["coding"],"current":false},…]` |
+| Variable                      | Description                                           | Example                                                                  |
+| ----------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| `MITTO_SESSION_ID`            | Current session ID                                    | `20260131-143052-a1b2c3d4`                                               |
+| `MITTO_WORKING_DIR`           | Session working directory                             | `/Users/me/myproject`                                                    |
+| `MITTO_IS_FIRST_MESSAGE`      | Whether this is the first message                     | `true` or `false`                                                        |
+| `MITTO_PROCESSORS_DIR`        | Path to the processors directory                      | `~/Library/Application Support/Mitto/processors`                         |
+| `MITTO_PROCESSOR_FILE`        | Path to the current processor's YAML file             | `.../processors/my-processor.yaml`                                       |
+| `MITTO_PROCESSOR_DIR`         | Directory containing the current processor file       | `.../processors`                                                         |
+| `MITTO_PARENT_SESSION_ID`     | Parent conversation ID (empty if root)                | `20260130-100000-aabbccdd`                                               |
+| `MITTO_PARENT_SESSION_NAME`   | Parent conversation title/name (empty if no parent)   | `Fix login bug`                                                          |
+| `MITTO_SESSION_NAME`          | Conversation title/name                               | `Fix login bug`                                                          |
+| `MITTO_ACP_SERVER`            | Active ACP server name                                | `claude-code`                                                            |
+| `MITTO_WORKSPACE_UUID`        | Workspace identifier                                  | `d4e5f6a7-b8c9-...`                                                      |
+| `MITTO_AVAILABLE_ACP_SERVERS` | JSON array of servers with workspaces for this folder | `[{"name":"auggie","tags":["coding"],"current":false},…]`                |
 | `MITTO_CHILD_SESSIONS`        | JSON array of child sessions                          | `[{"id":"20260131-...","name":"Sub task","acp_server":"claude-code"},…]` |
 
 ## Variable Substitution
@@ -665,14 +663,14 @@ Processors that timeout or exit with non-zero status are treated as errors.
 
 ## Text-Mode vs Command-Mode Comparison
 
-| Feature        | Text-Mode                    | Command-Mode                           |
-| -------------- | ---------------------------- | -------------------------------------- |
-| Configuration  | `text` field in YAML         | `command` field + external script      |
-| Content        | Static text (with variables) | Dynamic via external commands          |
-| Input          | None (text is inline)        | JSON via stdin                         |
-| Output         | None (text is inline)        | JSON via stdout                        |
-| Use case       | Context, reminders, rules    | Complex transformations, external data |
-| Dependencies   | None                         | External script or binary              |
+| Feature       | Text-Mode                    | Command-Mode                           |
+| ------------- | ---------------------------- | -------------------------------------- |
+| Configuration | `text` field in YAML         | `command` field + external script      |
+| Content       | Static text (with variables) | Dynamic via external commands          |
+| Input         | None (text is inline)        | JSON via stdin                         |
+| Output        | None (text is inline)        | JSON via stdout                        |
+| Use case      | Context, reminders, rules    | Complex transformations, external data |
+| Dependencies  | None                         | External script or binary              |
 
 Both modes share the same triggering (`when`), positioning (`position`), priority,
 conditional enablement (`enabledWhen`, `enabledWhenMCP`), re-run, and error handling features.

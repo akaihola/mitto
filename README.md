@@ -38,21 +38,43 @@ install yet another AI coding agent...
 
 ## Features
 
-🤖 **Multi-Agent Support** — Connect to Claude Code, Copilot CLI, Auggie or any [ACP-compatible](https://agentcommunicationprotocol.dev/) agent
+🤖 **Agents & Workspaces**
 
-🖥️ **Multiple Interfaces** — Native macOS app and Web Browser
+- **Multi-Agent Support** — Connect to Claude Code, Copilot CLI, Auggie or any [ACP-compatible](https://agentcommunicationprotocol.dev/) agent
+- **Multi-Workspace Support** — Configure multiple ACP agents and workspaces, each with their own settings, prompts, and processors
 
-🖥️ **Mobile fiendly** — Connect from your mobile phone to the sessions in your laptop, and [continue your work on the go](docs/config/ext-access.md). Support touchscreen gestures for switching between conversations and more.
+💬 **Conversations**
 
-💬 **Session Management** — Automatic conversation history with resume capability
+- **Session Management** — Automatic conversation history with resume capability
+- **Parent/Children Conversations** — Spawn child conversations to delegate work to faster/cheaper models, wait for results, and synthesize — enabling multi-agent workflows
+- **Periodic Conversations** — Schedule recurring prompts (every N minutes/hours/days) for automated tasks like daily reports or periodic checks
+- **Message Queue** — Queue messages while the agent is busy, with auto-generated titles and automatic delivery when the agent becomes idle
 
-🎨 **Rich Rendering** — Syntax-highlighted code blocks and Markdown support
+🖥️ **User Interface**
 
-⚡ **Streaming** — Real-time responses with live updates
+- **Multiple Interfaces** — Native macOS app and Web Browser
+- **Rich Rendering** — Syntax-highlighted code blocks and Markdown support
+- **Streaming** — Real-time responses with live updates
+- **Keyboard Shortcuts** — Create, delete, or navigate between conversations
+- **Slash Commands** — Type `/` to access quick commands provided by the agent (cancel, web search, etc.)
+- **Follow-up Suggestions** — AI-generated action buttons appear after agent responses, enabling one-tap continuation especially useful on mobile
 
-🔒 **Permission Control** — Review and approve agent actions
+🔧 **Customization & Extensibility**
 
-🖥️ **Keyboard shortcuts** — Use keyboard shortcuts to create, delete or navigate between conversations.
+- **Quick Actions & Pre-defined Prompts** — Customizable prompt buttons (per-project or global) with conditional visibility rules using CEL expressions. Built-in prompts for common workflows like "Run Tests", "Commit Changes", "Code Review", and more
+- **Message Processors & Hooks** — Transform messages with declarative text injection or external command processors. Auto-prepend system prompts, append reminders, or pipe messages through custom scripts
+- **MCP Server** — Built-in Model Context Protocol server for cross-conversation automation, interactive UI prompts, and agent-to-agent orchestration
+
+📎 **Input**
+
+- **Image & File Uploads** — Attach images (PNG, JPEG, GIF, WebP) and files to your conversations via paste, drag-and-drop, or file picker
+- **Permission Control** — Review and approve agent actions
+
+🌐 **[External Access](docs/config/ext-access.md)** — Access your conversations from anywhere
+
+- **Mobile Friendly** — Connect from your phone or tablet with touchscreen gestures for switching between conversations
+- **Auto-Tunnels** — Automatic tunnel setup/teardown (Cloudflare, ngrok, or custom) — no manual port forwarding needed
+- **Security** — Scanner defense with rate limiting and IP blocking, restricted runners for sandboxed agent execution, authentication for remote access
 
 ## Quick Start
 
@@ -72,6 +94,21 @@ Download the latest release from the [releases page](https://github.com/inercia/
 
 - **macOS**: Download `Mitto-darwin-*.dmg` for the native app, or `mitto-darwin-*.tar.gz` for CLI only
 - **Linux**: Download `mitto-linux-*.tar.gz`
+
+#### Build from Source
+
+Requires Go 1.24+ and (for the macOS app) Xcode Command Line Tools.
+
+```bash
+# CLI only
+make build
+./mitto web
+
+# macOS app (includes CLI)
+make build-mac-app
+open Mitto.app
+# Or run directly: ./Mitto.app/Contents/MacOS/mitto-app
+```
 
 ### Configure
 
@@ -96,3 +133,7 @@ Download the latest release from the [releases page](https://github.com/inercia/
 ## License
 
 [MIT](LICENSE)
+
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or implied. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from the use of this software. Use at your own risk.

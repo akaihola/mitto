@@ -22,10 +22,10 @@ Parent (Opus)
 
 Auto-children are configured in `workspaces.json` (located in the Mitto data directory):
 
-| Platform  | Path                                                          |
-| --------- | ------------------------------------------------------------- |
-| macOS     | `~/Library/Application Support/Mitto/workspaces.json`        |
-| Linux     | `~/.local/share/mitto/workspaces.json`                        |
+| Platform | Path                                                  |
+| -------- | ----------------------------------------------------- |
+| macOS    | `~/Library/Application Support/Mitto/workspaces.json` |
+| Linux    | `~/.local/share/mitto/workspaces.json`                |
 
 ### Example workspaces.json
 
@@ -38,8 +38,8 @@ Auto-children are configured in `workspaces.json` (located in the Mitto data dir
       "acp_server": "Auggie (Opus 4.5)",
       "working_dir": "/path/to/project",
       "auto_children": [
-        { "title": "coder",        "target_workspace_uuid": "ws-sonnet" },
-        { "title": "shell runner", "target_workspace_uuid": "ws-haiku"  }
+        { "title": "coder", "target_workspace_uuid": "ws-sonnet" },
+        { "title": "shell runner", "target_workspace_uuid": "ws-haiku" }
       ]
     },
     {
@@ -60,10 +60,10 @@ Auto-children are configured in `workspaces.json` (located in the Mitto data dir
 
 ### AutoChild Fields
 
-| Field                  | Required | Description                                                                         |
-| ---------------------- | -------- | ----------------------------------------------------------------------------------- |
-| `title`                | Yes      | Name displayed for the child conversation                                           |
-| `target_workspace_uuid`| No       | UUID of the workspace to use for the child. Defaults to the parent's own workspace. |
+| Field                   | Required | Description                                                                         |
+| ----------------------- | -------- | ----------------------------------------------------------------------------------- |
+| `title`                 | Yes      | Name displayed for the child conversation                                           |
+| `target_workspace_uuid` | No       | UUID of the workspace to use for the child. Defaults to the parent's own workspace. |
 
 ### Constraints
 
@@ -110,12 +110,12 @@ Delete parent
 
 ### Comparison: Auto-Children vs MCP-Created Children
 
-| Aspect               | Auto-children (`is_auto_child: true`) | MCP-created children (`is_auto_child: false`) |
-| -------------------- | ------------------------------------- | ---------------------------------------------- |
-| Created when         | New top-level conversation            | Via `mitto_conversation_new` MCP tool          |
-| On parent delete     | Cascade-deleted                       | Orphaned (parent link cleared)                 |
-| Working directory    | Inherited from parent                 | Specified by MCP call                          |
-| ACP server           | From target workspace                 | From target workspace or MCP call              |
+| Aspect            | Auto-children (`is_auto_child: true`) | MCP-created children (`is_auto_child: false`) |
+| ----------------- | ------------------------------------- | --------------------------------------------- |
+| Created when      | New top-level conversation            | Via `mitto_conversation_new` MCP tool         |
+| On parent delete  | Cascade-deleted                       | Orphaned (parent link cleared)                |
+| Working directory | Inherited from parent                 | Specified by MCP call                         |
+| ACP server        | From target workspace                 | From target workspace or MCP call             |
 
 ## Use Cases
 
@@ -141,6 +141,7 @@ then waits for both to complete before proceeding.
 ### Specialized Helpers
 
 Configure children with different roles:
+
 - One child for writing tests
 - One child for documentation
 - One child for infrastructure/devops tasks

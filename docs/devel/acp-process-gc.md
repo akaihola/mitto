@@ -27,12 +27,12 @@ when no conversations are actively using the workspace.
 
 ### Root Causes
 
-| # | Root Cause | Location |
-|---|------------|----------|
-| 1 | `StopProcess()` is dead code — never called except during full server shutdown (`CloseAll()`) | `session_manager.go` |
-| 2 | `BackgroundSession` objects stay in `SessionManager.sessions` map after their work completes | `session_manager.go` |
-| 3 | No mechanism to detect and clean up idle sessions or idle processes | — |
-| 4 | `ProcessPendingQueues()` resumes sessions even when the queue is empty by the time `ResumeSession` runs | `session_manager.go` |
+| #   | Root Cause                                                                                              | Location             |
+| --- | ------------------------------------------------------------------------------------------------------- | -------------------- |
+| 1   | `StopProcess()` is dead code — never called except during full server shutdown (`CloseAll()`)           | `session_manager.go` |
+| 2   | `BackgroundSession` objects stay in `SessionManager.sessions` map after their work completes            | `session_manager.go` |
+| 3   | No mechanism to detect and clean up idle sessions or idle processes                                     | —                    |
+| 4   | `ProcessPendingQueues()` resumes sessions even when the queue is empty by the time `ResumeSession` runs | `session_manager.go` |
 
 ## Solution: Two-Tier Periodic Garbage Collection
 
@@ -51,6 +51,7 @@ A session is considered **idle** when ALL of the following are true:
 - Not closed (not already cleaned up)
 
 When a session is idle, the GC calls `CloseSession()`, which:
+
 - Removes it from `SessionManager.sessions`
 - Calls `bs.Close()` (unregisters from shared process, stops recorder)
 
@@ -103,6 +104,7 @@ GC in place, this should be **deferred**: pre-warm only when the process is crea
 for an actual user conversation, not for transient queue/periodic work.
 
 Change `GetOrCreateProcess()` to accept a `prewarm bool` parameter:
+
 - `true` when called from `CreateSession`/`ResumeSession` for user conversations
 - `false` when called from `ProcessPendingQueues` or `PeriodicRunner` paths
 
@@ -122,10 +124,12 @@ type GCConfig struct {
 ```
 
 New fields on `ACPProcessManager`:
+
 - `lastSessionSeen map[string]time.Time` — per workspace, when sessions were last present
 - `gcStop chan struct{}` / `gcDone chan struct{}` — lifecycle management
 
 New methods:
+
 - `StartGC(config GCConfig, sessionQuery SessionQueryFunc)` — starts the GC goroutine
 - `StopGC()` — stops the GC goroutine
 - `RunGCOnce(sessionQuery SessionQueryFunc)` — single GC iteration (exported for testing)
@@ -224,6 +228,7 @@ func (m *ACPProcessManager) GetOrCreateProcess(
 ```
 
 Update callers:
+
 - `SessionManager.getSharedProcess()` → pass `true` (user conversations)
 - `SessionManager.EnsureWorkspaceAuxiliary()` → pass `false`
 - Any transient/background path → pass `false`
@@ -266,26 +271,31 @@ every Interval:
 ## Edge Cases
 
 ### Session closed during active auxiliary prompt
+
 Auxiliary prompts (title-gen, follow-up) run asynchronously. If the GC closes a
 session while an aux prompt is in-flight, the aux prompt will fail with "no shared
 process" on the next attempt. This is acceptable — the failure is logged and the
 aux result is simply lost (title generation, follow-up suggestions are non-critical).
 
 ### Process stopped while PeriodicRunner is about to deliver
+
 If the GC stops a process and the PeriodicRunner immediately tries to deliver,
 `ResumeSession()` will call `GetOrCreateProcess()` and restart the process. This is
 the correct behavior — the process is started on demand.
 
 ### Rapid open/close of conversations
+
 The 60-second grace period prevents the process from being stopped and immediately
 restarted. The user can open and close several conversations within 60 seconds
 without triggering process restarts.
 
 ### Multiple workspaces
+
 Each workspace has its own independent GC tracking. Closing all sessions in
 workspace A does not affect workspace B's process.
 
 ### Server shutdown
+
 `StopGC()` is called during shutdown. The existing `CloseAll()` → `pm.Close()`
 path handles killing all processes. The GC does not interfere.
 
@@ -310,19 +320,19 @@ The GC intervals could be made configurable via `config.yaml` under a new sectio
 
 ```yaml
 process:
-  gc_interval: 30s        # How often to check for idle processes
-  gc_grace_period: 60s    # How long to wait before stopping an idle process
+  gc_interval: 30s # How often to check for idle processes
+  gc_grace_period: 60s # How long to wait before stopping an idle process
 ```
 
 For the initial implementation, hardcoded defaults are sufficient.
 
 ## Impact Summary
 
-| Component | Change |
-|-----------|--------|
-| `ACPProcessManager` | New GC loop, `lastSessionSeen` tracking, `StartGC`/`StopGC`/`RunGCOnce` |
-| `SessionManager` | New `GetSessionInfoByWorkspace()` method |
-| `server.go` | Wire up GC start/stop |
-| `GetOrCreateProcess` | Optional: add `prewarm` parameter |
-| Existing session lifecycle | **No changes** — GC is purely additive |
-| Tests | New unit tests for GC; existing tests unaffected |
+| Component                  | Change                                                                  |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `ACPProcessManager`        | New GC loop, `lastSessionSeen` tracking, `StartGC`/`StopGC`/`RunGCOnce` |
+| `SessionManager`           | New `GetSessionInfoByWorkspace()` method                                |
+| `server.go`                | Wire up GC start/stop                                                   |
+| `GetOrCreateProcess`       | Optional: add `prewarm` parameter                                       |
+| Existing session lifecycle | **No changes** — GC is purely additive                                  |
+| Tests                      | New unit tests for GC; existing tests unaffected                        |

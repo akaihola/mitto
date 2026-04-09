@@ -52,7 +52,7 @@ The URL changes every restart, so this is best for testing or occasional use.
 
 ```yaml
 web:
-  external_port: 0  # Random port for external access (required for tunneling)
+  external_port: 0 # Random port for external access (required for tunneling)
   hooks:
     up:
       command: "cloudflared tunnel --url http://localhost:${PORT}"
@@ -105,7 +105,7 @@ port is random by default, set a fixed `external_port`:
 
 ```yaml
 web:
-  external_port: 8443  # Fixed port for the tunnel to connect to
+  external_port: 8443 # Fixed port for the tunnel to connect to
   hooks:
     up:
       command: "cloudflared tunnel run mitto"
@@ -314,7 +314,7 @@ web:
   auth:
     cloudflare:
       team_domain: yourteam.cloudflareaccess.com
-      audience: 32eafc7626e737...  # From Cloudflare Access app settings
+      audience: 32eafc7626e737... # From Cloudflare Access app settings
 ```
 
 Mitto fetches signing keys from `https://<team_domain>/cdn-cgi/access/certs` (JWKS)
@@ -324,25 +324,25 @@ who have already authenticated through Cloudflare Access.
 To also allow direct username/password access, add `simple` alongside `cloudflare`:
 
 ```yaml
-  auth:
-    cloudflare:
-      team_domain: yourteam.cloudflareaccess.com
-      audience: 32eafc7626e737...
-    simple:
-      username: admin
-      password: your-secure-password
+auth:
+  cloudflare:
+    team_domain: yourteam.cloudflareaccess.com
+    audience: 32eafc7626e737...
+  simple:
+    username: admin
+    password: your-secure-password
 ```
 
 ### Security model
 
-| Layer                      | What it protects                                                       |
-| -------------------------- | ---------------------------------------------------------------------- |
-| **Cloudflare Access**      | Edge-level SSO/OAuth — blocks unauthenticated requests at the edge     |
-| **Mitto JWT validation**   | Validates Cloudflare JWTs at the origin — signature, issuer, audience, expiry |
-| **Mitto simple auth**      | Optional username/password for direct access (standalone or fallback)  |
-| **Tunnel encryption**      | Data in transit — TLS between browser and edge                         |
-| **External listener**      | All tunnel traffic requires auth, even from localhost                  |
-| **API prefix**             | Obscures API endpoints (`/mitto/api/...`)                              |
+| Layer                    | What it protects                                                              |
+| ------------------------ | ----------------------------------------------------------------------------- |
+| **Cloudflare Access**    | Edge-level SSO/OAuth — blocks unauthenticated requests at the edge            |
+| **Mitto JWT validation** | Validates Cloudflare JWTs at the origin — signature, issuer, audience, expiry |
+| **Mitto simple auth**    | Optional username/password for direct access (standalone or fallback)         |
+| **Tunnel encryption**    | Data in transit — TLS between browser and edge                                |
+| **External listener**    | All tunnel traffic requires auth, even from localhost                         |
+| **API prefix**           | Obscures API endpoints (`/mitto/api/...`)                                     |
 
 With `cloudflare` auth configured, users authenticate once through Cloudflare Access.
 Mitto validates the JWT to confirm identity — no additional login page is required.
@@ -354,11 +354,11 @@ users who access Mitto directly without going through Cloudflare.
 When a user authenticates through Cloudflare Access, these headers are added to
 requests forwarded to the origin:
 
-| Header                                | Description                                    |
-| ------------------------------------- | ---------------------------------------------- |
-| `Cf-Access-Jwt-Assertion`             | Signed JWT token (RS256) — validated by Mitto  |
-| `Cf-Access-Authenticated-User-Email`  | Authenticated user's email                     |
-| `CF_Authorization` (cookie)           | Same JWT (set in browser, used as fallback)    |
+| Header                               | Description                                   |
+| ------------------------------------ | --------------------------------------------- |
+| `Cf-Access-Jwt-Assertion`            | Signed JWT token (RS256) — validated by Mitto |
+| `Cf-Access-Authenticated-User-Email` | Authenticated user's email                    |
+| `CF_Authorization` (cookie)          | Same JWT (set in browser, used as fallback)   |
 
 Mitto validates the `Cf-Access-Jwt-Assertion` header (falling back to the
 `CF_Authorization` cookie) against Cloudflare's public signing keys fetched from
